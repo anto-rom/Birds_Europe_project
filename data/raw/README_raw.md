@@ -56,3 +56,14 @@ Una vez descargado el ZIP:
 ## Nota
 Los datos permanecen bajo la licencia indicada en el archivo `eml.xml`.  
 Este repositorio solo almacena **datos procesados**, no los archivos RAW completos.
+
+## Raw data (not tracked)
+El dataset original es demasiado grande para GitHub.
+
+Fuente:
+- df_final.csv (Dropbox): https://www.dropbox.com/scl/fi/32xdaqm2545076rnbl577/df_final.csv?rlkey=qm00csccin2nr6xwmahwtq4f8&st=zigaetql&dl=1
+
+Para generar dataset procesado:
+- ejecutar `python src/build_balanced_dataset.py` o el notebook correspondiente.
+
+
