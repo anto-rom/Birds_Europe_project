@@ -2,11 +2,11 @@
 data/raw/*
 !data/raw/README.md
 
-# si processed puede crecer, ignóralo también (opcional)
+
 # data/processed/*
 # !data/processed/README.md
 
-# modelos grandes (opcional)
+# modelos grandes
 models/*
 !models/README.md
 
@@ -18,3 +18,4 @@ __pycache__/
 # entornos
 .venv/
 .env
+
