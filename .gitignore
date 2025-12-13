@@ -1,0 +1,20 @@
+# data
+data/raw/*
+!data/raw/README.md
+
+# si processed puede crecer, ignóralo también (opcional)
+# data/processed/*
+# !data/processed/README.md
+
+# modelos grandes (opcional)
+models/*
+!models/README.md
+
+# notebooks checkpoints / python
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# entornos
+.venv/
+.env
