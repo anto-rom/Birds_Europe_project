@@ -1,21 +1,11 @@
-# data
-data/raw/*
-!data/raw/README.md
+# DuckDB
+*.duckdb
+*.wal
 
+# Data folders
+notebooks/data/
+data/interim/
 
-# data/processed/*
-# !data/processed/README.md
-
-# modelos grandes
-models/*
-!models/README.md
-
-# notebooks checkpoints / python
-.ipynb_checkpoints/
-__pycache__/
-*.pyc
-
-# entornos
-.venv/
-.env
-
+# OS / IDE
+.vscode/
+.DS_Store
