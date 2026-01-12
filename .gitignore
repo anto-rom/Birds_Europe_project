@@ -11,6 +11,15 @@ notebooks/data/
 # Artifacts / outputs
 artifacts/
 audio_cache/
+embeddings_yamnet/
+*.npz
+*.wav
+*.mp3
+*.flac
+*.ogg
 
 # Jupyter
 .ipynb_checkpoints/
+
+
+
