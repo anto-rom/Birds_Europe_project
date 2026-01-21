@@ -3,6 +3,12 @@ data/raw/
 data/interim/
 data/processed/
 notebooks/data/
+Add-Content .gitignore "artifacts/embeddings_yamnet/"
+Add-Content .gitignore "artifacts/model_artifacts/*.npy"
+Add-Content .gitignore "artifacts/model_artifacts/*.joblib"
+Add-Content .gitignore "__pycache__/"
+Add-Content .gitignore "*.npz"
+
 
 # DuckDB
 *.duckdb
