@@ -1,11 +1,10 @@
-===============================
+##
 XENO-CANTO CLASSIFICATION PROJECT
 METRICS SUMMARY (XGBoost + Logistic Regression)
-===============================
 
-===========================================
-MODEL 1 — XGBOOST (MULTICLASS, 104 SPECIES)
-===========================================
+
+
+# MODEL 1 — XGBOOST (MULTICLASS, 104 SPECIES)
 
 • Features: YAMNet embeddings summary (emb_mean + emb_std + n_frames)
 • Samples: ~92 577
@@ -25,9 +24,9 @@ XGBoost captura relaciones no lineales en el espacio de embedding (2049 dims).
 El rendimiento Top-5 es adecuado para escenarios de recomendación, y comparable
 a sistemas de referencia con YAMNet bajo limitaciones de CPU.
 
-===========================================
-MODEL 2 — LOGISTIC REGRESSION (SAGA)
-===========================================
+
+# MODEL 2 — LOGISTIC REGRESSION (SAGA)
+
 
 • Features: mismos embeddings que XGBoost
 • Solver: saga (multinomial automático)
@@ -66,3 +65,4 @@ NOTAS TÉCNICAS
 • Embeddings generados con YAMNet (TensorFlow Hub).
 • No se usan características temporales completas (solo resumen mean+std), 
   po
+
