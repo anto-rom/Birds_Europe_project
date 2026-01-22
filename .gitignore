@@ -27,5 +27,18 @@ embeddings_yamnet/
 # Jupyter
 .ipynb_checkpoints/
 
+# Google Perch
+# Modelos y embeddings grandes
+perch_model/
+embeddings_perch/
+embeddings_yamnet/
+*.zip
+
+# Archivos de cache y notebooks temporales
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+
 
 

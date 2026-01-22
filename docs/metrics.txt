@@ -1,7 +1,14 @@
 ===============================
+TRANSFER LEARNING YAMNET
 XENO-CANTO CLASSIFICATION PROJECT
-METRICS SUMMARY (XGBoost + Logistic Regression)
+METRICS SUMMARY (XGBoost, Logistic Regression, KNN, Random Forest, KNN, MLP) 
 ===============================
+
+• Features: YAMNET embeddings de 1024 dimensiones 
+• Samples: ~92 577
+• Classes: 104
+• 16 Hz cada audio 
+• Mono
 
 ===========================================
 MODEL 1 — XGBOOST (MULTICLASS, 104 SPECIES)
@@ -47,10 +54,66 @@ Requiere regularización fina o reducción de dimensionalidad (PCA) para mejorar
 Útil como baseline rápido, pero inferior a XGBoost.
 
 ===========================================
-CONCLUSIONES COMPARATIVAS
+MODEL 3 — Random Forest
 ===========================================
 
-• El modelo XGBoost ofrece el mejor desempeño general.
+• Features: Embeddings Yanmet - 1024 dimensiones 
+
+Results:
+---------
+Total embeddings limpios: 92744
+Total especies: 104
+Dimensión embedding: (92744, 1024)
+Test Accuracy (Top-1): 28.71%
+
+Interpretation:
+---------------
+Random Forest brindo un test accuracy muy bajo. No se lo puede considerar para precedir. 
+Ademas, el modelo, al entrenarlo ocupa mucho espacio en el disco
+
+===========================================
+MODEL 4 — KNN por similitud
+===========================================
+
+• Features: Embeddings Yanmet - 1024 dimensiones 
+
+Results:
+---------
+Embeddings: (92744, 1024 Dimensiones)
+Especies: 104
+Top-1 Accuracy: 19.88%
+Top-3 Accuracy: 30.87%
+
+Interpretation:
+---------------
+KNN tiene un test accuracy muy bajo. No es un modelo adecuado para predecir.
+
+===========================================
+MODEL 5 — MLP Perceptron Multicapa 
+===========================================
+
+• Features: Embeddings Yanmet - 1024 dimensiones 
+  hidden_layer_sizes=(512, 256, 128),
+  max_iter=500,
+  learning_rate_init=0.001,
+  random_state=42,
+  verbose=True
+
+Results:
+---------
+Embeddings: (92744, 1024 Dimensiones)
+Test Accuracy: 30.72%
+
+Interpretation:
+---------------
+MLP tiene un test accuracy muy bajo. El modelo demora mucho en su proceso. Los resultados
+indican que no es buen predictor. 
+
+===========================================
+CONCLUSIONES COMPARATIVAS EN TRANSFER LEARNING YAMNET
+===========================================
+
+• El modelo XGBoost ofrece el mejor desempeño general para el Transfer learning YAMNET
 • Top-5 de 0.68 demuestra que el sistema es útil como recomendador de especies,
   especialmente en un dominio con alto solapamiento acústico.
 • Logistic Regression funciona como baseline rápido de entrenamiento, pero no alcanza 
@@ -66,3 +129,37 @@ NOTAS TÉCNICAS
 • Embeddings generados con YAMNet (TensorFlow Hub).
 • No se usan características temporales completas (solo resumen mean+std), 
   po
+
+
+
+===============================
+TRANSFER LEARNING GOOGLE PERCH 
+XENO-CANTO CLASSIFICATION PROJECT
+METRICS SUMMARY GOOGLE PERCH
+===============================
+
+• Features: GOOGLE PERCH EMBEDDINGS, 1280 dimensiones, bioacustica compatible. 
+            Sistema Transfer Learning
+• Samples:   ~92 477
+• Classes:   104
+• 32 Hz
+• Sonido Mono 
+
+===========================================
+LOGISTIC REGRESSION MULTINOMIAL SOFTMAX
+===========================================
+
+Results:
+---------
+🎯 Top-1 Accuracy: 0.7682
+🥉 Top-3 Accuracy: 0.8543
+
+Interpretation:
+---------------
+Google Perch es un transfer learning desarrollado por Google y es compatible con bioacustica
+o sonidos de aves
+Regresion Logistica Multinomial SOFTMAX es el modelo mas adecuado para entrenar Embeddings Perch
+El modelo utiliza algebra lineal, linealidad en espacios semanticos, evita overfitting
+Es rapido de entrenar y se basa en probabilidades por especie. 
+Es un modelo adecuado con alta precision para multiespecies. 
+
