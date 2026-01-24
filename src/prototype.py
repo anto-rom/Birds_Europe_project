@@ -1,3 +1,7 @@
+import os
+from pathlib import Path
+
+# Cache cross-platform (Render/Linux usa /tmp)
 os.environ["TFHUB_CACHE_DIR"] = os.getenv(
     "TFHUB_CACHE_DIR",
     str(Path("/tmp") / "tfhub_cache")
@@ -10,32 +14,29 @@ import pandas as pd
 import tensorflow_hub as hub
 import tensorflow as tf
 import librosa
-from pathlib import Path
-
 import requests
 from xgboost import XGBClassifier
-
 
 # -----------------------------
 # CONFIG
 # -----------------------------
-BASE_DIR = Path(__file__).resolve().parent          # ...\Xeno_Canto_Project\src
-PROJECT_ROOT = BASE_DIR.parent                     # ...\Xeno_Canto_Project
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
 
 XGB_MODEL_JSON_PATH = BASE_DIR / "xgb_model.json"
 ENCODER_PATH        = BASE_DIR / "label_encoder.joblib"
 
-# Repo GitHub (ajusta si hace falta)
 GITHUB_OWNER = "anto-rom"
 GITHUB_REPO  = "Xeno_Canto_Project"
 RELEASE_ASSET_NAME = "xgb_model.json"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1")
+# ---- Cargar YAMNet con IO device fijado ----
+load_opts = tf.saved_model.LoadOptions(experimental_io_device="/job:localhost")
+YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1", options=load_opts)
+
 TARGET_SR = 16000
 
-BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR.parent
 
 # -----------------------------
 # DOWNLOAD HELPERS
@@ -278,4 +279,5 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
