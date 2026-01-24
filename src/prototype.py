@@ -1,5 +1,7 @@
-import os
-os.environ["TFHUB_CACHE_DIR"] = r"C:\Projects\tfhub_cache"
+os.environ["TFHUB_CACHE_DIR"] = os.getenv(
+    "TFHUB_CACHE_DIR",
+    str(Path("/tmp") / "tfhub_cache")
+)
 
 from flask import Flask, request, render_template
 import numpy as np
@@ -276,3 +278,4 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
