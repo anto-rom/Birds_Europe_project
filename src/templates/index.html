@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>XenoCanto – Bird Classifier</title>
+
+  <style>
+    :root{
+      --peacock: #007C82;        /* azul pavo real */
+      --peacock-dark: #00646A;
+      --text: #0f172a;
+      --muted: #475569;
+      --card: rgba(255,255,255,0.92);
+      --card-strong: rgba(255,255,255,0.96);
+      --border: rgba(15, 23, 42, 0.12);
+      --shadow: 0 18px 50px rgba(0,0,0,.35);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body{
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Helvetica Neue", "Noto Sans", "Liberation Sans", sans-serif;
+
+      /* ===== Opción A (GitHub RAW) ===== */
+      background-image: linear-gradient(180deg, rgba(0,0,0,.62), rgba(0,0,0,.62)),
+        url("{{ url_for('static', filename='bird_screensaver.jpg') }}");
+
+      background-size: cover;
+      background-position: center;
+      background-attachment: fixed;
+    }
+
+    /* ===== Opción B (recomendada): si guardas la imagen en /static/img/...
+       Sustituye el background-image de body por:
+       background-image:
+         linear-gradient(180deg, rgba(0,0,0,.62), rgba(0,0,0,.62)),
+         url("{{ url_for('static', filename='img/bird_screensaver.jpg') }}");
+    */
+
+    .wrap{
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 28px 16px;
+    }
+
+    .shell{
+      width: min(980px, 100%);
+      display: grid;
+      gap: 16px;
+    }
+
+    .hero{
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 22px 22px;
+      backdrop-filter: blur(6px);
+    }
+
+    .hero-top{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .title{
+      margin: 0;
+      font-size: clamp(22px, 3vw, 34px);
+      font-weight: 800;
+      letter-spacing: .2px;
+    }
+
+    .subtitle{
+      margin: 6px 0 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+      max-width: 62ch;
+      font-size: 14.5px;
+    }
+
+    .badge{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--card-strong);
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .badge-dot{
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--peacock);
+      box-shadow: 0 0 0 4px rgba(0,124,130,.14);
+    }
+
+    .uploader{
+      margin-top: 18px;
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+    }
+
+    /* Ocultamos el input real */
+    input[type="file"]{
+      position: absolute;
+      left: -9999px;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+    }
+
+    .btn-row{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+      width: 100%;
+    }
+
+    .btn{
+      border: 0;
+      cursor: pointer;
+      border-radius: 14px;
+      padding: 14px 18px;
+      font-weight: 800;
+      font-size: 15px;
+      letter-spacing: .2px;
+      transition: transform .08s ease, filter .15s ease, background .15s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      min-width: 210px;
+      box-shadow: 0 10px 24px rgba(0,0,0,.18);
+    }
+
+    .btn:active{ transform: translateY(1px); }
+
+    .btn-primary{
+      background: var(--peacock);
+      color: white;
+    }
+    .btn-primary:hover{ filter: brightness(1.06); }
+    .btn-primary:disabled{
+      opacity: .6;
+      cursor: not-allowed;
+    }
+
+    .btn-ghost{
+      background: white;
+      color: var(--peacock-dark);
+      border: 1px solid rgba(0,124,130,.35);
+      box-shadow: 0 10px 24px rgba(0,0,0,.12);
+    }
+    .btn-ghost:hover{ background: rgba(0,124,130,.06); }
+
+    .hint{
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .file-pill{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.05);
+      border: 1px dashed rgba(15, 23, 42, 0.18);
+      color: var(--muted);
+      font-size: 13px;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .section{
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px 18px;
+      backdrop-filter: blur(6px);
+    }
+
+    .section h2{
+      margin: 0 0 12px 0;
+      font-size: 18px;
+      font-weight: 900;
+    }
+
+    .error{
+      border-left: 6px solid #ef4444;
+      background: rgba(239, 68, 68, 0.08);
+    }
+
+    .error h3{
+      margin: 0 0 8px 0;
+      color: #b91c1c;
+      font-size: 16px;
+    }
+
+    pre{
+      margin: 10px 0 0 0;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.06);
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      border-radius: 12px;
+      overflow: auto;
+      font-size: 12.5px;
+      color: #111827;
+    }
+
+    .grid{
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 12px;
+    }
+
+    .card{
+      grid-column: span 12;
+      background: white;
+      border: 1px solid rgba(15, 23, 42, 0.10);
+      border-radius: 16px;
+      padding: 14px 14px;
+      box-shadow: 0 10px 26px rgba(0,0,0,.08);
+    }
+
+    .card-head{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .species{
+      margin: 0;
+      font-size: 16px;
+      font-weight: 900;
+    }
+
+    .score{
+      font-size: 13px;
+      font-weight: 900;
+      color: var(--peacock-dark);
+      background: rgba(0,124,130,.10);
+      border: 1px solid rgba(0,124,130,.22);
+      padding: 6px 10px;
+      border-radius: 999px;
+    }
+
+    .desc{
+      margin: 10px 0 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 14px;
+    }
+
+    @media (min-width: 820px){
+      .card{ grid-column: span 6; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="shell">
+
+      <section class="hero">
+        <div class="hero-top">
+          <div>
+            <h1 class="title">Bird Sound Classifier</h1>
+            <p class="subtitle">
+              Upload a short .wav or .mp3 clip and get the Top-5 predictions
+              powered by <b>YAMNet embeddings</b> + <b>XGBoost</b>.
+            </p>
+          </div>
+
+          <div class="badge" title="Model pipeline">
+            <span class="badge-dot"></span>
+            XGBoost + YAMNet • Prototype
+          </div>
+        </div>
+
+        <form method="POST" enctype="multipart/form-data" class="uploader">
+          <input id="audio" type="file" name="audio" accept=".wav,.mp3" />
+
+          <div class="btn-row">
+            <label for="audio" class="btn btn-ghost" role="button" aria-label="Choose audio file">
+              Choose a file
+            </label>
+
+            <button id="predictBtn" type="submit" class="btn btn-primary">
+              Predict
+            </button>
+          </div>
+
+          <div id="fileName" class="file-pill" style="display:none;"></div>
+
+          <p class="hint">
+            Tip: best results with clean recordings (mono/short clips). Supported: WAV, MP3.
+          </p>
+        </form>
+      </section>
+
+      {% if error %}
+      <section class="section error">
+        <h3>{{ error }}</h3>
+        {% if details %}<pre>{{ details }}</pre>{% endif %}
+      </section>
+      {% endif %}
+
+      {% if results %}
+      <section class="section">
+        <h2>Top-5 Predictions</h2>
+        <div class="grid">
+          {% for r in results %}
+          <div class="card">
+            <div class="card-head">
+              <p class="species">{{ r.species }}</p>
+              <span class="score">Score: {{ r.score }}</span>
+            </div>
+            <p class="desc">{{ r.description }}</p>
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+    </div>
+  </div>
+
+  <script>
+    const audio = document.getElementById("audio");
+    const fileName = document.getElementById("fileName");
+    const predictBtn = document.getElementById("predictBtn");
+
+    audio.addEventListener("change", () => {
+      if (audio.files && audio.files.length > 0) {
+        fileName.style.display = "inline-flex";
+        fileName.textContent = audio.files[0].name;
+        predictBtn.disabled = false;
+      } else {
+        fileName.style.display = "none";
+        fileName.textContent = "";
+      }
+    });
+  </script>
+</body>
+</html>
+
