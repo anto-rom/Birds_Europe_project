@@ -52,35 +52,21 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
     if local_path.exists() and local_path.stat().st_size > 0:
         return
 
-    api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-    r = requests.get(api_url, headers=_github_headers(), timeout=30)
-    r.raise_for_status()
-    release = r.json()
-
-    assets = release.get("assets", [])
-    asset = next((a for a in assets if a.get("name") == asset_name), None)
-    if not asset:
-        available = [a.get("name") for a in assets]
-        raise FileNotFoundError(
-            f"No encuentro el asset '{asset_name}' en el último Release. "
-            f"Assets disponibles: {available}"
-        )
-
-    download_url = asset.get("browser_download_url")
-    if not download_url:
-        raise RuntimeError("El asset no trae 'browser_download_url'.")
+    # Descarga directa del asset del último release (sin API -> sin rate limit)
+    download_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/{asset_name}"
 
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with requests.get(download_url, headers=_github_headers(), stream=True, timeout=60) as dl:
-        dl.raise_for_status()
+    with requests.get(download_url, stream=True, timeout=120, allow_redirects=True) as r:
+        r.raise_for_status()
         with open(local_path, "wb") as f:
-            for chunk in dl.iter_content(chunk_size=1024 * 1024):
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     f.write(chunk)
 
     if not local_path.exists() or local_path.stat().st_size == 0:
         raise RuntimeError("Descarga completada pero el archivo quedó vacío/corrupto.")
+
 
 
 # -----------------------------
@@ -279,6 +265,7 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 
