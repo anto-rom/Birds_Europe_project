@@ -39,6 +39,7 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
+!data/raw/species_catalog_with_description.csv
 
 
 
