@@ -207,12 +207,25 @@ def ensure_ready():
             STATE["boot_error"] = None
         except Exception as e:
             STATE["ready"] = False
-            STATE["boot_error"] = f"{type(e).__name__}: {e}"
+            STATE["boot_error"] = f"{type(e).__name__}: {e} | repo={GITHUB_OWNER}/{GITHUB_REPO}"
+
 
 # -----------------------------
 # FLASK APP
 # -----------------------------
 app = Flask(__name__, template_folder="templates")
+
+@app.get("/debug_boot")
+def debug_boot():
+    # No expone secretos, solo configuración básica
+    return {
+        "github_owner": GITHUB_OWNER,
+        "github_repo": GITHUB_REPO,
+        "asset": RELEASE_ASSET_NAME,
+        "download_url_example": f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/{RELEASE_ASSET_NAME}",
+        "uses_api": False,
+    }, 200
+
 
 @app.get("/healthz")
 def healthz():
@@ -277,3 +290,4 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
