@@ -23,7 +23,7 @@ from xgboost import XGBClassifier
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 
-XGB_MODEL_JSON_PATH = BASE_DIR / "xgb_model.json"
+XGB_MODEL_JSON_PATH = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.json")))
 ENCODER_PATH        = BASE_DIR / "label_encoder.joblib"
 
 GITHUB_OWNER = "anto-rom"
@@ -279,5 +279,6 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
