@@ -1,34 +1,19 @@
-# -------------------------
-# CORE WEB
-# -------------------------
 Flask==3.0.2
 gunicorn==21.2.0
 
-# -------------------------
-# MACHINE LEARNING
-# -------------------------
-numpy==1.26.4           # Compatible con TensorFlow 2.15 (TF no soporta numpy 2.x)
+numpy==1.26.4
 pandas==2.2.2
 scikit-learn==1.4.2
 xgboost==2.0.3
 
-# -------------------------
-# AUDIO / DSP
-# -------------------------
 librosa==0.10.1
 soundfile==0.12.1
 
-# -------------------------
-# TENSORFLOW / TF-HUB
-# -------------------------
 tensorflow==2.15.0
 tensorflow_hub==0.15.0
-tensorflow_io==0.36.0   # Necesario para cargas de audio internas
+tensorflow_io==0.36.0
 
-# -------------------------
-# UTILIDADES
-# -------------------------
 requests==2.31.0
 joblib==1.3.2
-protobuf==4.25.2        # Versión estable para TF
-google-pasta==0.2.0
+protobuf==4.25.2
+jinja2==3.1.4
