@@ -1,8 +1,8 @@
 import os
-from pathlib import Path
+import time
 import uuid
 import threading
-from jinja2 import TemplateNotFound
+from pathlib import Path
 
 # Cache cross-platform (Render/Linux usa /tmp)
 os.environ["TFHUB_CACHE_DIR"] = os.getenv(
@@ -11,13 +11,15 @@ os.environ["TFHUB_CACHE_DIR"] = os.getenv(
 )
 
 from flask import Flask, request, render_template
+from jinja2 import TemplateNotFound
+
 import numpy as np
-import joblib
 import pandas as pd
+import joblib
+import requests
+import librosa
 import tensorflow_hub as hub
 import tensorflow as tf
-import librosa
-import requests
 from xgboost import XGBClassifier
 
 
@@ -27,12 +29,12 @@ from xgboost import XGBClassifier
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 
-# En Render descargamos el modelo a /tmp
+# En Render descargamos el modelo a /tmp (por defecto)
 XGB_MODEL_JSON_PATH = Path(
     os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.json"))
 )
 
-# Encoder local (repo). Si no existe, usamos fallback /tmp descargado desde Releases
+# Encoder local (repo). Si no existe, fallback /tmp descargado desde Releases
 ENCODER_PATH = BASE_DIR / "label_encoder.joblib"
 ENCODER_TMP_PATH = Path("/tmp") / "label_encoder.joblib"
 
@@ -56,18 +58,18 @@ YAMNET_MODEL = None
 def get_yamnet():
     global YAMNET_MODEL
     if YAMNET_MODEL is None:
+        # Importante: lazy, NO cargar en warmup/bootstrap
         load_opts = tf.saved_model.LoadOptions(experimental_io_device="/job:localhost")
         YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1", options=load_opts)
     return YAMNET_MODEL
 
 
 # -----------------------------
-# DOWNLOAD HELPERS (sin API)
+# DOWNLOAD HELPERS
 # -----------------------------
 def download_release_asset_if_missing(local_path: Path, asset_name: str):
     """
     Descarga directa del asset del último release (sin GitHub API).
-    Evita rate limit y simplifica.
     """
     if local_path.exists() and local_path.stat().st_size > 0:
         return
@@ -81,7 +83,7 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
         ctype = (r.headers.get("Content-Type") or "").lower()
         if "text/html" in ctype:
             raise RuntimeError(
-                f"GitHub devolvió HTML, no binario. "
+                f"GitHub devolvió HTML en vez de binario. "
                 f"¿Existe '{asset_name}' en Releases?"
             )
 
@@ -93,10 +95,10 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
         tmp.replace(local_path)
 
     if not local_path.exists() or local_path.stat().st_size == 0:
-        raise RuntimeError("Archivo descargado vacío/corrupto.")
+        raise RuntimeError(f"Archivo descargado vacío/corrupto: {local_path}")
 
 
-def download_url_if_missing(local_path: Path, url: str, timeout: int = 180):
+def download_url_if_missing(local_path: Path, url: str, timeout: int = 60):
     """
     Descarga desde una URL (raw github, etc.) a un fichero local.
     """
@@ -107,6 +109,7 @@ def download_url_if_missing(local_path: Path, url: str, timeout: int = 180):
 
     with requests.get(url, stream=True, timeout=timeout, allow_redirects=True) as r:
         r.raise_for_status()
+
         tmp = local_path.with_suffix(".part")
         with open(tmp, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
@@ -164,51 +167,13 @@ def load_descriptions(file_path: Path) -> dict:
     return dict(zip(df["scientificName"], df["description"]))
 
 
-def safe_bootstrap_assets():
-    """
-    - Descarga modelo XGB desde Releases a /tmp si falta
-    - Descarga encoder desde Releases a /tmp si falta en repo
-    - Descarga CSV de descripciones desde DESC_CSV_URL si existe; si no, usa archivo local
-    """
-    # 1) Modelo XGBoost desde Releases
-    download_release_asset_if_missing(XGB_MODEL_JSON_PATH, RELEASE_ASSET_NAME)
-    if not XGB_MODEL_JSON_PATH.exists():
-        raise FileNotFoundError(f"Modelo no encontrado: {XGB_MODEL_JSON_PATH}")
-
-    # 2) Encoder: usa repo si existe; si no, baja de Releases
-    encoder_path = ENCODER_PATH
-    if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
-        download_release_asset_if_missing(ENCODER_TMP_PATH, ENCODER_ASSET_NAME)
-        encoder_path = ENCODER_TMP_PATH
-
-    if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
-        raise FileNotFoundError(f"Encoder no encontrado ni descargable: {encoder_path}")
-
-    # 3) Descripciones
-    desc_url = (os.getenv("DESC_CSV_URL") or "").strip()
-    if desc_url:
-        download_url_if_missing(DESC_TMP_PATH, desc_url, timeout=180)
-        desc_file = DESC_TMP_PATH
-    else:
-        desc_file = resolve_description_file(PROJECT_ROOT)
-
-    desc_map = load_descriptions(desc_file)
-
-    # 4) Cargar modelo y encoder
-    model = XGBClassifier()
-    model.load_model(str(XGB_MODEL_JSON_PATH))
-
-    label_encoder = joblib.load(encoder_path)
-
-    return model, label_encoder, desc_map, desc_file
-
-
 # -----------------------------
 # AUDIO / ML FUNCTIONS
 # -----------------------------
 def load_audio(file_path: Path):
     waveform, _ = librosa.load(str(file_path), sr=TARGET_SR)
     return waveform
+
 
 def compute_yamnet_embeddings(audio):
     yamnet = get_yamnet()
@@ -217,6 +182,7 @@ def compute_yamnet_embeddings(audio):
     emb_std = tf.math.reduce_std(embeddings, axis=0).numpy()
     n_frames = embeddings.shape[0]
     return np.concatenate([emb_mean, emb_std, [n_frames]])
+
 
 def predict_top5(model, label_encoder, x):
     proba = model.predict_proba([x])[0]
@@ -232,14 +198,17 @@ def predict_top5(model, label_encoder, x):
 app = Flask(
     __name__,
     template_folder=str(BASE_DIR / "templates"),
-    static_folder=str(BASE_DIR / "static")
+    static_folder=str(BASE_DIR / "static"),
 )
-
 
 STATE = {
     "ready": False,
     "booting": False,
     "boot_error": None,
+
+    "boot_step": None,
+    "boot_started_at": None,
+
     "model": None,
     "label_encoder": None,
     "desc_map": None,
@@ -251,29 +220,63 @@ BOOT_LOCK = threading.Lock()
 
 def _bootstrap():
     try:
-        print("BOOT: starting bootstrap...")
-        m, le, dm, df = safe_bootstrap_assets()
-        print("BOOT: assets loaded OK")
-        STATE["model"] = m
-        STATE["label_encoder"] = le
-        STATE["desc_map"] = dm
-        STATE["desc_file"] = df
-        STATE["ready"] = True
+        STATE["boot_started_at"] = time.time()
         STATE["boot_error"] = None
-        print("BOOT: READY")
+
+        # 1) Modelo XGBoost desde Releases
+        STATE["boot_step"] = "download_xgb"
+        download_release_asset_if_missing(XGB_MODEL_JSON_PATH, RELEASE_ASSET_NAME)
+
+        # 2) Encoder: repo si existe; si no, Releases
+        STATE["boot_step"] = "ensure_encoder"
+        encoder_path = ENCODER_PATH
+        if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
+            download_release_asset_if_missing(ENCODER_TMP_PATH, ENCODER_ASSET_NAME)
+            encoder_path = ENCODER_TMP_PATH
+
+        if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
+            raise FileNotFoundError(f"Encoder no encontrado ni descargable: {encoder_path}")
+
+        # 3) Descripciones: DESC_CSV_URL manda
+        STATE["boot_step"] = "download_desc"
+        desc_url = (os.getenv("DESC_CSV_URL") or "").strip()
+        if desc_url:
+            download_url_if_missing(DESC_TMP_PATH, desc_url, timeout=60)
+            desc_file = DESC_TMP_PATH
+        else:
+            desc_file = resolve_description_file(PROJECT_ROOT)
+
+        STATE["boot_step"] = "load_desc"
+        desc_map = load_descriptions(desc_file)
+
+        # 4) Cargar modelo + encoder
+        STATE["boot_step"] = "load_xgb"
+        model = XGBClassifier()
+        model.load_model(str(XGB_MODEL_JSON_PATH))
+
+        STATE["boot_step"] = "load_encoder"
+        label_encoder = joblib.load(encoder_path)
+
+        # Importante: NO cargar YAMNet aquí (dejarlo lazy)
+        STATE["boot_step"] = "finalize"
+        STATE["model"] = model
+        STATE["label_encoder"] = label_encoder
+        STATE["desc_map"] = desc_map
+        STATE["desc_file"] = desc_file
+
+        STATE["ready"] = True
+        STATE["boot_step"] = "ready"
+
     except Exception as e:
         STATE["ready"] = False
         STATE["boot_error"] = f"{type(e).__name__}: {e}"
-        print("BOOT: ERROR ->", STATE["boot_error"])
+        STATE["boot_step"] = "error"
     finally:
         STATE["booting"] = False
 
 
 def ensure_ready():
-    # No bloquear request; dispara bootstrap en background una vez
-    if STATE["ready"]:
-        return
-    if STATE["booting"]:
+    if STATE["ready"] or STATE["booting"]:
         return
 
     with BOOT_LOCK:
@@ -285,36 +288,33 @@ def ensure_ready():
 
 
 # -----------------------------
-# ROUTES
+# ROUTES (limpias y definitivas)
 # -----------------------------
-# -----------------------------
-# RUTAS DEFINITIVAS
-# -----------------------------
-from flask import request, render_template
-from jinja2 import TemplateNotFound
-import os
-
-# 1) HEALTH CHECK DE RENDER — SIEMPRE 200, SIN BOOTSTRAP
 @app.route("/healthz", methods=["GET"])
 def healthz():
+    elapsed = None
+    if STATE.get("boot_started_at"):
+        elapsed = round(time.time() - STATE["boot_started_at"], 1)
+
     return {
         "ready": STATE["ready"],
         "booting": STATE["booting"],
+        "boot_step": STATE.get("boot_step"),
         "boot_error": STATE["boot_error"],
+        "boot_elapsed_s": elapsed,
     }, 200
 
 
-# 2) DEBUG DEL FILESYSTEM — CRÍTICO PARA VER SI RENDER VE LOS TEMPLATES
 @app.route("/debug_fs", methods=["GET"])
 def debug_fs():
     templates_dir = BASE_DIR / "templates"
     static_dir = BASE_DIR / "static"
 
-    def safe_list(p):
+    def safe_list(p: Path):
         try:
             return sorted(os.listdir(p))
-        except:
-            return ["ERROR"]
+        except Exception as e:
+            return [f"ERROR: {type(e).__name__}: {e}"]
 
     return {
         "cwd": str(Path.cwd()),
@@ -328,45 +328,55 @@ def debug_fs():
     }, 200
 
 
-# 3) WARMUP — AQUÍ SÍ ARRANCA EL BOOTSTRAP
 @app.route("/warmup", methods=["GET"])
 def warmup():
     ensure_ready()
+
+    elapsed = None
+    if STATE.get("boot_started_at"):
+        elapsed = round(time.time() - STATE["boot_started_at"], 1)
+
     return {
         "ready": STATE["ready"],
         "booting": STATE["booting"],
+        "boot_step": STATE.get("boot_step"),
         "boot_error": STATE["boot_error"],
+        "boot_elapsed_s": elapsed,
     }, 200
 
 
-# 4) INDEX — SOLO GET/POST. HEAD SE IGNORA (EVITA BUCLE RENDER)
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET", "POST", "HEAD"])
 def index():
-    # Render health check usa HEAD /
+    # Render health check hace HEAD / (Go-http-client). No dispares bootstrap aquí.
     if request.method == "HEAD":
         return ("", 200)
 
     ensure_ready()
 
-    # Si aún está arrancando, enseña la plantilla pero no trigger más boots
+    # Si aún está arrancando o falló, devuelve la plantilla con estado
     if not STATE["ready"]:
         try:
             return render_template(
                 "index.html",
-                error="Inicializando...",
+                error="Inicializando..." if STATE["booting"] else "Fallo en el arranque de la app",
                 details=STATE["boot_error"],
-                meta={"desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None},
+                meta={
+                    "boot_step": STATE.get("boot_step"),
+                    "booting": STATE["booting"],
+                    "ready": STATE["ready"],
+                    "desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None,
+                },
             )
         except TemplateNotFound:
-            return ("TemplateNotFound: index.html", 500)
+            expected = BASE_DIR / "templates" / "index.html"
+            return (f"TemplateNotFound: index.html (expected at {expected})", 500)
 
-    # Ya listo → lógica principal
+    # Listo → lógica principal
     model = STATE["model"]
     label_encoder = STATE["label_encoder"]
     desc_map = STATE["desc_map"]
     desc_file_used = STATE["desc_file"]
 
-    # POST: procesar audio
     if request.method == "POST":
         f = request.files.get("audio")
         if not f:
@@ -402,7 +412,7 @@ def index():
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except:
+            except Exception:
                 pass
 
         return render_template(
@@ -412,14 +422,12 @@ def index():
         )
 
     # GET normal
-    try:
-        return render_template(
-            "index.html",
-            meta={"desc_file": str(desc_file_used)},
-        )
-    except TemplateNotFound:
-        return ("TemplateNotFound: index.html", 500)
-# -----------------------------
+    return render_template(
+        "index.html",
+        meta={"desc_file": str(desc_file_used)},
+    )
+
 
 if __name__ == "__main__":
+    # Local only
     app.run(debug=True)
