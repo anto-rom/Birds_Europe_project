@@ -19,6 +19,7 @@ import librosa
 import requests
 from xgboost import XGBClassifier
 
+
 # -----------------------------
 # CONFIG
 # -----------------------------
@@ -30,13 +31,21 @@ XGB_MODEL_JSON_PATH = Path(
     os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.json"))
 )
 
+# Encoder local (repo). Si no existe, usamos fallback /tmp descargado desde Releases
 ENCODER_PATH = BASE_DIR / "label_encoder.joblib"
+ENCODER_TMP_PATH = Path("/tmp") / "label_encoder.joblib"
+
+# CSV de descripciones descargado desde DESC_CSV_URL (si está)
+DESC_TMP_PATH = Path("/tmp") / "species_catalog_with_description.csv"
 
 GITHUB_OWNER = "anto-rom"
 GITHUB_REPO = "Xeno_Canto_Project"
+
 RELEASE_ASSET_NAME = "xgb_model.json"
+ENCODER_ASSET_NAME = "label_encoder.joblib"
 
 TARGET_SR = 16000
+
 
 # -----------------------------
 # YAMNet lazy-load
@@ -49,6 +58,7 @@ def get_yamnet():
         load_opts = tf.saved_model.LoadOptions(experimental_io_device="/job:localhost")
         YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1", options=load_opts)
     return YAMNET_MODEL
+
 
 # -----------------------------
 # DOWNLOAD HELPERS (sin API)
@@ -84,6 +94,29 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
     if not local_path.exists() or local_path.stat().st_size == 0:
         raise RuntimeError("Archivo descargado vacío/corrupto.")
 
+
+def download_url_if_missing(local_path: Path, url: str, timeout: int = 180):
+    """
+    Descarga desde una URL (raw github, etc.) a un fichero local.
+    """
+    if local_path.exists() and local_path.stat().st_size > 0:
+        return
+
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with requests.get(url, stream=True, timeout=timeout, allow_redirects=True) as r:
+        r.raise_for_status()
+        tmp = local_path.with_suffix(".part")
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        tmp.replace(local_path)
+
+    if not local_path.exists() or local_path.stat().st_size == 0:
+        raise RuntimeError(f"Descarga vacía/corrupta desde {url}")
+
+
 # -----------------------------
 # LOADERS
 # -----------------------------
@@ -99,11 +132,12 @@ def resolve_description_file(project_root: Path) -> Path:
         if p.exists() and p.stat().st_size > 0:
             return p
 
-    expected = "\n".join([str(p) for p in candidates])
+    expected = "\n- " + "\n- ".join(str(x) for x in candidates)
     raise FileNotFoundError(
-        "No encuentro archivo de descripciones. Busqué en:\n"
+        "No se encontró archivo de descripciones. Esperaba uno de:"
         f"{expected}"
     )
+
 
 def load_descriptions(file_path: Path) -> dict:
     if file_path.suffix.lower() in [".xlsx", ".xls"]:
@@ -117,47 +151,61 @@ def load_descriptions(file_path: Path) -> dict:
     df.columns = [c.strip() for c in df.columns]
 
     required = {"scientificName", "description"}
-    if not required.issubset(df.columns):
+    if not required.issubset(set(df.columns)):
         raise ValueError(
-            f"Columnas requeridas no encontradas en {file_path.name}. "
-            f"Tengo: {df.columns}"
+            f"El archivo de descripciones debe tener columnas {required}. "
+            f"Encontradas: {set(df.columns)}"
         )
 
-    df = df[["scientificName", "description"]].copy()
     df["scientificName"] = df["scientificName"].astype(str).str.strip()
-    df["description"] = df["description"].astype(str).str.strip()
-
-    df = df[df["scientificName"] != ""]
-    df = df[df["description"] != ""]
-    df = df.drop_duplicates(subset=["scientificName"], keep="last")
+    df["description"] = df["description"].astype(str)
 
     return dict(zip(df["scientificName"], df["description"]))
 
+
 def safe_bootstrap_assets():
+    """
+    - Descarga modelo XGB desde Releases a /tmp si falta
+    - Descarga encoder desde Releases a /tmp si falta en repo
+    - Descarga CSV de descripciones desde DESC_CSV_URL si existe; si no, usa archivo local
+    """
+    # 1) Modelo XGBoost desde Releases
     download_release_asset_if_missing(XGB_MODEL_JSON_PATH, RELEASE_ASSET_NAME)
     if not XGB_MODEL_JSON_PATH.exists():
         raise FileNotFoundError(f"Modelo no encontrado: {XGB_MODEL_JSON_PATH}")
 
-    if not ENCODER_PATH.exists():
-        raise FileNotFoundError(
-            f"Encoder no encontrado: {ENCODER_PATH}. "
-            "Acción: súbelo a src/ o añade descarga."
-        )
+    # 2) Encoder: usa repo si existe; si no, baja de Releases
+    encoder_path = ENCODER_PATH
+    if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
+        download_release_asset_if_missing(ENCODER_TMP_PATH, ENCODER_ASSET_NAME)
+        encoder_path = ENCODER_TMP_PATH
 
-    desc_file = resolve_description_file(PROJECT_ROOT)
+    if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
+        raise FileNotFoundError(f"Encoder no encontrado ni descargable: {encoder_path}")
+
+    # 3) Descripciones
+    desc_url = (os.getenv("DESC_CSV_URL") or "").strip()
+    if desc_url:
+        download_url_if_missing(DESC_TMP_PATH, desc_url, timeout=180)
+        desc_file = DESC_TMP_PATH
+    else:
+        desc_file = resolve_description_file(PROJECT_ROOT)
+
     desc_map = load_descriptions(desc_file)
 
+    # 4) Cargar modelo y encoder
     model = XGBClassifier()
     model.load_model(str(XGB_MODEL_JSON_PATH))
 
-    label_encoder = joblib.load(ENCODER_PATH)
+    label_encoder = joblib.load(encoder_path)
 
     return model, label_encoder, desc_map, desc_file
+
 
 # -----------------------------
 # AUDIO / ML FUNCTIONS
 # -----------------------------
-def load_audio(file_path):
+def load_audio(file_path: Path):
     waveform, _ = librosa.load(str(file_path), sr=TARGET_SR)
     return waveform
 
@@ -176,63 +224,90 @@ def predict_top5(model, label_encoder, x):
     scores = proba[idx]
     return list(zip(species, scores))
 
+
 # -----------------------------
-# LAZY BOOTSTRAP (PRO-RENDER)
+# APP + STATE
 # -----------------------------
+app = Flask(__name__)
+
 STATE = {
     "ready": False,
+    "booting": False,
     "boot_error": None,
     "model": None,
     "label_encoder": None,
-    "desc_map": {},
-    "desc_file_used": None,
+    "desc_map": None,
+    "desc_file": None,
 }
-_BOOT_LOCK = threading.Lock()
+
+BOOT_LOCK = threading.Lock()
+
+
+def _bootstrap():
+    try:
+        m, le, dm, df = safe_bootstrap_assets()
+        STATE["model"] = m
+        STATE["label_encoder"] = le
+        STATE["desc_map"] = dm
+        STATE["desc_file"] = df
+        STATE["ready"] = True
+        STATE["boot_error"] = None
+    except Exception as e:
+        STATE["ready"] = False
+        STATE["boot_error"] = f"{type(e).__name__}: {e}"
+    finally:
+        STATE["booting"] = False
+
 
 def ensure_ready():
+    # No bloquear request; dispara bootstrap en background una vez
     if STATE["ready"]:
         return
+    if STATE["booting"]:
+        return
 
-    with _BOOT_LOCK:
-        if STATE["ready"]:
+    with BOOT_LOCK:
+        if STATE["ready"] or STATE["booting"]:
             return
-
-        try:
-            m, le, dm, df = safe_bootstrap_assets()
-            STATE["model"] = m
-            STATE["label_encoder"] = le
-            STATE["desc_map"] = dm
-            STATE["desc_file_used"] = df
-            STATE["ready"] = True
-            STATE["boot_error"] = None
-        except Exception as e:
-            STATE["ready"] = False
-            STATE["boot_error"] = f"{type(e).__name__}: {e} | repo={GITHUB_OWNER}/{GITHUB_REPO}"
+        STATE["booting"] = True
+        t = threading.Thread(target=_bootstrap, daemon=True)
+        t.start()
 
 
 # -----------------------------
-# FLASK APP
+# ROUTES
 # -----------------------------
-app = Flask(__name__, template_folder="templates")
-
-@app.get("/debug_boot")
-def debug_boot():
-    # No expone secretos, solo configuración básica
-    return {
-        "github_owner": GITHUB_OWNER,
-        "github_repo": GITHUB_REPO,
-        "asset": RELEASE_ASSET_NAME,
-        "download_url_example": f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/{RELEASE_ASSET_NAME}",
-        "uses_api": False,
-    }, 200
-
-
-@app.get("/healthz")
+@app.route("/healthz", methods=["GET"])
 def healthz():
     ensure_ready()
     if STATE["ready"]:
-        return {"status": "ready"}, 200
-    return {"status": "error", "detail": STATE["boot_error"]}, 500
+        return {
+            "status": "ready",
+            "desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None
+        }, 200
+    return {
+        "status": "error",
+        "detail": STATE["boot_error"],
+        "booting": STATE["booting"]
+    }, 500
+
+
+@app.route("/debug_boot", methods=["GET"])
+def debug_boot():
+    return {
+        "cwd": str(Path.cwd()),
+        "base_dir": str(BASE_DIR),
+        "project_root": str(PROJECT_ROOT),
+        "xgb_model_path": str(XGB_MODEL_JSON_PATH),
+        "encoder_path_repo": str(ENCODER_PATH),
+        "encoder_path_tmp": str(ENCODER_TMP_PATH),
+        "desc_csv_url": os.getenv("DESC_CSV_URL"),
+        "tfhub_cache_dir": os.getenv("TFHUB_CACHE_DIR"),
+        "ready": STATE["ready"],
+        "booting": STATE["booting"],
+        "boot_error": STATE["boot_error"],
+    }, 200
+
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -242,40 +317,52 @@ def index():
         return render_template(
             "index.html",
             error="Fallo en el arranque de la app",
-            details=STATE["boot_error"]
+            details=STATE["boot_error"],
+            meta={"desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None}
         )
 
     model = STATE["model"]
     label_encoder = STATE["label_encoder"]
     desc_map = STATE["desc_map"]
-    desc_file_used = STATE["desc_file_used"]
+    desc_file_used = STATE["desc_file"]
 
     if request.method == "POST":
-        file = request.files.get("audio")
-        if not file or file.filename == "":
-            return render_template("index.html", error="No file selected")
+        f = request.files.get("audio")
+        if not f:
+            return render_template(
+                "index.html",
+                error="No se subió ningún archivo",
+                meta={"desc_file": str(desc_file_used)}
+            )
 
-        tmp_path = Path("/tmp") / f"upload_{uuid.uuid4().hex}.wav"
-        file.save(str(tmp_path))
+        tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{f.filename}"
+        f.save(tmp_path)
 
         try:
-            audio = load_audio(tmp_path)
-            x = compute_yamnet_embeddings(audio)
+            waveform = load_audio(tmp_path)
+            x = compute_yamnet_embeddings(waveform)
             top5 = predict_top5(model, label_encoder, x)
+
+            results = []
+            for sp, score in top5:
+                results.append({
+                    "scientificName": sp,
+                    "score": float(score),
+                    "description": desc_map.get(sp, "No description available.")
+                })
+
+        except Exception as e:
+            return render_template(
+                "index.html",
+                error="Error procesando el audio",
+                details=f"{type(e).__name__}: {e}",
+                meta={"desc_file": str(desc_file_used)}
+            )
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except:
+            except Exception:
                 pass
-
-        results = []
-        for species, score in top5:
-            desc = desc_map.get(species, "Description not available")
-            results.append({
-                "species": species,
-                "score": float(score),
-                "description": desc
-            })
 
         return render_template(
             "index.html",
@@ -288,6 +375,6 @@ def index():
         meta={"desc_file": str(desc_file_used)}
     )
 
+
 if __name__ == "__main__":
     app.run(debug=True)
-
