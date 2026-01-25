@@ -3,6 +3,7 @@ import time
 import uuid
 import threading
 import zipfile
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,15 @@ import requests
 from flask import Flask, request, render_template
 from jinja2 import TemplateNotFound
 from xgboost import XGBClassifier
+
+# ------------------------------------------
+# RENDER / LOGGING
+# ------------------------------------------
+# Recomendado en Render como env var: PYTHONUNBUFFERED=1
+# (aun así, forzamos flush=True en los logs críticos)
+def log(msg: str):
+    print(f"[BOOT] {msg}", flush=True)
+
 
 # Cache cross-platform (Render/Linux usa /tmp)
 os.environ["TFHUB_CACHE_DIR"] = os.getenv("TFHUB_CACHE_DIR", str(Path("/tmp") / "tfhub_cache"))
@@ -50,7 +60,9 @@ def get_yamnet():
     global YAMNET_MODEL
     if YAMNET_MODEL is None:
         import tensorflow_hub as hub
+        log("Lazy-loading YAMNet (tfhub)...")
         YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1")
+        log("YAMNet loaded.")
     return YAMNET_MODEL
 
 
@@ -64,35 +76,54 @@ def _default_headers():
         "Accept": "*/*",
     }
 
+def _assert_not_html_response(r: requests.Response, url: str, asset_hint: str = ""):
+    ctype = (r.headers.get("Content-Type") or "").lower()
+    if "text/html" in ctype:
+        raise RuntimeError(
+            "GitHub/URL devolvió HTML en vez de binario. "
+            f"{asset_hint} URL={url} content-type={ctype}"
+        )
+
 def download_release_asset_if_missing(local_path: Path, asset_name: str):
     """
     Descarga directa del asset del último release (sin GitHub API).
     """
     if local_path.exists() and local_path.stat().st_size > 0:
+        log(f"Asset ya existe: {local_path} ({local_path.stat().st_size} bytes)")
         return
 
     url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/{asset_name}"
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with requests.get(url, stream=True, timeout=180, allow_redirects=True, headers=_default_headers()) as r:
-        r.raise_for_status()
+    log(f"Downloading release asset: {asset_name}")
+    log(f"URL: {url}")
+    log(f"Dest: {local_path}")
 
-        ctype = (r.headers.get("Content-Type") or "").lower()
-        if "text/html" in ctype:
-            raise RuntimeError(
-                f"GitHub devolvió HTML en vez de binario. "
-                f"¿Existe '{asset_name}' en Releases? URL={url}"
-            )
+    # timeouts robustos: (connect, read)
+    with requests.get(
+        url,
+        stream=True,
+        timeout=(10, 120),
+        allow_redirects=True,
+        headers=_default_headers()
+    ) as r:
+        r.raise_for_status()
+        _assert_not_html_response(r, url, asset_hint=f"asset='{asset_name}'")
 
         tmp = local_path.with_suffix(".part")
+        bytes_written = 0
         with open(tmp, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     f.write(chunk)
+                    bytes_written += len(chunk)
+
         tmp.replace(local_path)
 
     if not local_path.exists() or local_path.stat().st_size == 0:
         raise RuntimeError(f"Archivo descargado vacío/corrupto: {local_path}")
+
+    log(f"Downloaded OK: {local_path} ({local_path.stat().st_size} bytes, wrote={bytes_written})")
 
 
 def download_url_if_missing(local_path: Path, url: str, timeout: int = 60):
@@ -100,26 +131,38 @@ def download_url_if_missing(local_path: Path, url: str, timeout: int = 60):
     Descarga desde una URL a un fichero local.
     """
     if local_path.exists() and local_path.stat().st_size > 0:
+        log(f"URL target ya existe: {local_path} ({local_path.stat().st_size} bytes)")
         return
 
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with requests.get(url, stream=True, timeout=timeout, allow_redirects=True, headers=_default_headers()) as r:
-        r.raise_for_status()
+    log(f"Downloading URL -> file: {url}")
+    log(f"Dest: {local_path}")
 
-        ctype = (r.headers.get("Content-Type") or "").lower()
-        if "text/html" in ctype:
-            raise RuntimeError(f"URL devolvió HTML (no CSV). url={url}")
+    with requests.get(
+        url,
+        stream=True,
+        timeout=(10, timeout),
+        allow_redirects=True,
+        headers=_default_headers()
+    ) as r:
+        r.raise_for_status()
+        _assert_not_html_response(r, url, asset_hint="(expected CSV/binary)")
 
         tmp = local_path.with_suffix(".part")
+        bytes_written = 0
         with open(tmp, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     f.write(chunk)
+                    bytes_written += len(chunk)
+
         tmp.replace(local_path)
 
     if not local_path.exists() or local_path.stat().st_size == 0:
         raise RuntimeError(f"Descarga vacía/corrupta desde {url}")
+
+    log(f"Downloaded OK: {local_path} ({local_path.stat().st_size} bytes, wrote={bytes_written})")
 
 
 def unzip_if_missing(zip_path: Path, out_path: Path):
@@ -127,28 +170,47 @@ def unzip_if_missing(zip_path: Path, out_path: Path):
     Descomprime zip_path en /tmp. Si el .bst viene en subcarpetas, lo mueve a out_path.
     """
     if out_path.exists() and out_path.stat().st_size > 0:
+        log(f"BST ya existe: {out_path} ({out_path.stat().st_size} bytes)")
         return
 
     if not zip_path.exists() or zip_path.stat().st_size == 0:
         raise RuntimeError(f"ZIP inexistente o vacío: {zip_path}")
 
+    log(f"Unzipping: {zip_path} -> {zip_path.parent}")
+    # Unzip
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(zip_path.parent)
 
+    # Debug: listar /tmp (acotado)
+    try:
+        tmp_listing = sorted([p.name for p in zip_path.parent.iterdir()])[:50]
+        log(f"/tmp listing (first 50): {tmp_listing}")
+    except Exception:
+        pass
+
     # 1) ¿salió justo donde lo esperas?
     if out_path.exists() and out_path.stat().st_size > 0:
+        log(f"BST listo tras unzip: {out_path} ({out_path.stat().st_size} bytes)")
         return
 
     # 2) Buscar cualquier .bst extraído y moverlo a out_path
     bst_candidates = list(zip_path.parent.rglob("*.bst"))
     if not bst_candidates:
-        raise RuntimeError(f"No hay .bst tras unzip. Revisa el contenido del ZIP: {zip_path}")
+        # También dump de algunos ficheros extraídos
+        extracted_any = list(zip_path.parent.rglob("*"))[:30]
+        raise RuntimeError(
+            f"No hay .bst tras unzip. ZIP={zip_path}. "
+            f"Ejemplos extraídos: {[str(x) for x in extracted_any]}"
+        )
 
     bst_candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+    log(f"BST candidates: {[str(p) for p in bst_candidates[:5]]}")
     bst_candidates[0].replace(out_path)
 
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise RuntimeError(f"No se pudo preparar el BST final en: {out_path}")
+
+    log(f"BST preparado: {out_path} ({out_path.stat().st_size} bytes)")
 
 
 # -----------------------------
@@ -227,7 +289,6 @@ def _fix_xgb_wrapper_after_load(model: XGBClassifier, label_encoder):
     """
     n_classes = int(len(getattr(label_encoder, "classes_", [])))
     if n_classes > 0:
-        # atributos típicos del wrapper sklearn
         model.n_classes_ = n_classes
         model.classes_ = np.arange(n_classes)
 
@@ -254,80 +315,104 @@ STATE = {
 }
 
 BOOT_LOCK = threading.Lock()
+BOOT_THREAD = None
+
+def _set_state(step=None, err=None, ready=None, booting=None):
+    if step is not None:
+        STATE["boot_step"] = step
+    if err is not None:
+        STATE["boot_error"] = err
+    if ready is not None:
+        STATE["ready"] = ready
+    if booting is not None:
+        STATE["booting"] = booting
 
 def _bootstrap():
     try:
-        STATE["boot_started_at"] = time.time()
-        STATE["boot_error"] = None
+        _set_state(err=None)
+        log(f"BOOT start. zip={XGB_MODEL_ZIP_PATH} bst={XGB_MODEL_PATH}")
 
         # 1) Descargar ZIP del modelo desde Releases
-        STATE["boot_step"] = "download_xgb_zip"
+        _set_state(step="download_xgb_zip")
         download_release_asset_if_missing(XGB_MODEL_ZIP_PATH, RELEASE_ASSET_NAME)
 
         # 2) Unzip -> BST
-        STATE["boot_step"] = "unzip_xgb"
+        _set_state(step="unzip_xgb")
         unzip_if_missing(XGB_MODEL_ZIP_PATH, XGB_MODEL_PATH)
 
         # 3) Cargar modelo
-        STATE["boot_step"] = "load_xgb"
+        _set_state(step="load_xgb")
         model = XGBClassifier()
         model.load_model(str(XGB_MODEL_PATH))
+        log("XGB model loaded.")
 
         # 4) Encoder: repo si existe; si no, Releases
-        STATE["boot_step"] = "ensure_encoder"
+        _set_state(step="ensure_encoder")
         encoder_path = ENCODER_PATH
         if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
+            log(f"Encoder not found in repo path: {ENCODER_PATH}. Downloading from Releases...")
             download_release_asset_if_missing(ENCODER_TMP_PATH, ENCODER_ASSET_NAME)
             encoder_path = ENCODER_TMP_PATH
 
         if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
             raise FileNotFoundError(f"Encoder no encontrado ni descargable: {encoder_path}")
 
-        STATE["boot_step"] = "load_encoder"
+        _set_state(step="load_encoder")
         label_encoder = joblib.load(encoder_path)
+        log(f"Label encoder loaded: {encoder_path}")
 
         # Fix crítico para predict_proba
         _fix_xgb_wrapper_after_load(model, label_encoder)
 
         # 5) Descripciones: DESC_CSV_URL manda
-        STATE["boot_step"] = "download_desc"
+        _set_state(step="download_desc")
         desc_url = (os.getenv("DESC_CSV_URL") or "").strip()
         if desc_url:
+            log(f"DESC_CSV_URL set. Downloading descriptions from: {desc_url}")
             download_url_if_missing(DESC_TMP_PATH, desc_url, timeout=60)
             desc_file = DESC_TMP_PATH
         else:
+            log("DESC_CSV_URL not set. Resolving description file from repo...")
             desc_file = resolve_description_file(PROJECT_ROOT)
 
-        STATE["boot_step"] = "load_desc"
+        _set_state(step="load_desc")
         desc_map = load_descriptions(desc_file)
+        log(f"Descriptions loaded from: {desc_file} (n={len(desc_map)})")
 
         # Importante: NO cargar YAMNet aquí (dejarlo lazy)
-        STATE["boot_step"] = "finalize"
+        _set_state(step="finalize")
         STATE["model"] = model
         STATE["label_encoder"] = label_encoder
         STATE["desc_map"] = desc_map
         STATE["desc_file"] = desc_file
 
-        STATE["ready"] = True
-        STATE["boot_step"] = "ready"
+        _set_state(ready=True, step="ready")
+        log("BOOT ready.")
 
     except Exception as e:
-        STATE["ready"] = False
-        STATE["boot_error"] = f"{type(e).__name__}: {e}"
-        STATE["boot_step"] = "error"
+        tb = traceback.format_exc()
+        _set_state(ready=False, step="error", err=f"{type(e).__name__}: {e}\n{tb}")
+        log(f"BOOT error: {type(e).__name__}: {e}")
     finally:
-        STATE["booting"] = False
-
+        _set_state(booting=False)
 
 def ensure_ready():
+    """
+    Arranque idempotente: si ya está ready o booting, no reinicia.
+    """
+    global BOOT_THREAD
     if STATE["ready"] or STATE["booting"]:
         return
+
     with BOOT_LOCK:
         if STATE["ready"] or STATE["booting"]:
             return
-        STATE["booting"] = True
-        t = threading.Thread(target=_bootstrap, daemon=True)
-        t.start()
+
+        STATE["boot_started_at"] = time.time()
+        _set_state(booting=True, ready=False, err=None, step="start")
+
+        BOOT_THREAD = threading.Thread(target=_bootstrap, daemon=True)
+        BOOT_THREAD.start()
 
 
 # -----------------------------
@@ -335,6 +420,8 @@ def ensure_ready():
 # -----------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
+    ensure_ready()  # healthz dispara boot una vez, pero no lo reinicia
+
     elapsed = None
     if STATE.get("boot_started_at"):
         elapsed = round(time.time() - STATE["boot_started_at"], 1)
@@ -434,5 +521,3 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
-
-
