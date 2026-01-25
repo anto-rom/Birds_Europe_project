@@ -6,14 +6,13 @@ import zipfile
 import traceback
 from pathlib import Path
 
-import numpy as np
 import csv
 import json
+
+import numpy as np
 import requests
 from flask import Flask, request, render_template
 from jinja2 import TemplateNotFound
-
-import xgboost as xgb  # <-- Booster/DMatrix
 
 
 # ------------------------------------------
@@ -63,6 +62,7 @@ YAMNET_MODEL = None
 def get_yamnet():
     global YAMNET_MODEL
     if YAMNET_MODEL is None:
+        # IMPORT PESADO -> SOLO cuando se necesite
         import tensorflow_hub as hub
         log("Lazy-loading YAMNet (tfhub)...")
         YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1")
@@ -231,7 +231,6 @@ def load_descriptions(file_path: Path) -> dict:
     if file_path.suffix.lower() != ".csv":
         raise ValueError(f"Solo se admite CSV para descripciones en Render: {file_path}")
 
-    # Intento 1: coma
     for delimiter in [",", ";"]:
         try:
             with open(file_path, "r", encoding="utf-8", newline="") as f:
@@ -251,7 +250,6 @@ def load_descriptions(file_path: Path) -> dict:
                 if out:
                     return out
         except UnicodeDecodeError:
-            # Fallback latin1
             with open(file_path, "r", encoding="latin1", newline="") as f:
                 reader = csv.DictReader(f, delimiter=delimiter)
                 if not reader.fieldnames:
@@ -278,11 +276,13 @@ def load_descriptions(file_path: Path) -> dict:
 # AUDIO / ML FUNCTIONS
 # -----------------------------
 def load_audio(file_path: Path):
+    # IMPORT PESADO -> SOLO cuando se necesite
     import librosa
     waveform, _ = librosa.load(str(file_path), sr=TARGET_SR)
     return waveform
 
 def compute_yamnet_embeddings(audio):
+    # IMPORT PESADO -> SOLO cuando se necesite
     import tensorflow as tf
     yamnet = get_yamnet()
 
@@ -293,24 +293,24 @@ def compute_yamnet_embeddings(audio):
     emb_mean = tf.reduce_mean(embeddings, axis=0).numpy()
     emb_std = tf.math.reduce_std(embeddings, axis=0).numpy()
     n_frames = int(embeddings.shape[0])
-    return np.concatenate([emb_mean, emb_std, [n_frames]])
+    return np.concatenate([emb_mean, emb_std, [n_frames]]).astype(np.float32)
 
-def predict_top5(booster: xgb.Booster, classes: list[str], x):
+def predict_top5(booster, classes: list[str], x):
     """
     Predice top-5 usando Booster + DMatrix (menor overhead de memoria).
     Requiere que el booster haya sido entrenado con multi:softprob (ideal).
     """
+    # IMPORT (moderado) -> SOLO cuando se necesite
+    import xgboost as xgb
+
     X = np.asarray([x], dtype=np.float32)
     dm = xgb.DMatrix(X)
 
     pred = booster.predict(dm)
-    # pred puede venir como (n_samples, n_classes) o (n_samples,) si softmax/binary
     pred = np.asarray(pred)
     if pred.ndim == 2:
         proba = pred[0]
     else:
-        # si viniera softmax con class index, no tenemos probabilidades -> no sirve para top5
-        # y si fuera binary:logistic, pred sería prob de class=1
         raise RuntimeError(
             f"Formato de predicción inesperado: shape={pred.shape}. "
             "Asegúrate de entrenar con objective='multi:softprob' para top-5."
@@ -337,7 +337,7 @@ STATE = {
     "boot_error": None,
     "boot_step": None,
     "boot_started_at": None,
-    "booster": None,          # <-- Booster
+    "booster": None,
     "classes": None,
     "desc_map": None,
     "desc_file": None,
@@ -369,14 +369,15 @@ def _bootstrap():
         _set_state(step="unzip_xgb")
         unzip_if_missing(XGB_MODEL_ZIP_PATH, XGB_MODEL_PATH)
 
-        # 3) Cargar modelo con Booster (menos overhead)
+        # 3) Cargar modelo con Booster (lazy import de xgboost)
         _set_state(step="load_xgb")
         log(f"About to load Booster from {XGB_MODEL_PATH} size={XGB_MODEL_PATH.stat().st_size}")
+        import xgboost as xgb
         booster = xgb.Booster()
         booster.load_model(str(XGB_MODEL_PATH))
         log("Booster loaded OK.")
 
-        # 4) Clases: repo si existe; si no, Releases (evita sklearn/joblib => menos RAM)
+        # 4) Clases: repo si existe; si no, Releases
         _set_state(step="ensure_classes")
         classes_path = CLASSES_PATH
         if (not classes_path.exists()) or classes_path.stat().st_size == 0:
@@ -513,7 +514,11 @@ def index():
     if request.method == "POST":
         f = request.files.get("audio")
         if not f:
-            return render_template("index.html", error="No se subió ningún archivo", meta={"desc_file": str(desc_file_used)})
+            return render_template(
+                "index.html",
+                error="No se subió ningún archivo",
+                meta={"desc_file": str(desc_file_used)},
+            )
 
         tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{f.filename}"
         f.save(tmp_path)
@@ -549,4 +554,3 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
-
