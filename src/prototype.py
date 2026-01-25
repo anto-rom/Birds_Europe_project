@@ -5,21 +5,16 @@ import threading
 import zipfile
 from pathlib import Path
 
-# Cache cross-platform (Render/Linux usa /tmp)
-os.environ["TFHUB_CACHE_DIR"] = os.getenv(
-    "TFHUB_CACHE_DIR",
-    str(Path("/tmp") / "tfhub_cache")
-)
-
-from flask import Flask, request, render_template
-from jinja2 import TemplateNotFound
-
 import numpy as np
 import pandas as pd
 import joblib
 import requests
+from flask import Flask, request, render_template
+from jinja2 import TemplateNotFound
 from xgboost import XGBClassifier
 
+# Cache cross-platform (Render/Linux usa /tmp)
+os.environ["TFHUB_CACHE_DIR"] = os.getenv("TFHUB_CACHE_DIR", str(Path("/tmp") / "tfhub_cache"))
 
 # -----------------------------
 # CONFIG
@@ -27,28 +22,27 @@ from xgboost import XGBClassifier
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 
-# GitHub repo
-GITHUB_OWNER = "anto-rom"
-GITHUB_REPO = "Xeno_Canto_Project"
+# GitHub repo (mejor por env vars para no redeployar)
+GITHUB_OWNER = os.getenv("GITHUB_OWNER", "anto-rom")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "Xeno_Canto_Project")
 
 # Modelo XGB (ZIP en Releases -> descomprime a BST en /tmp)
-RELEASE_ASSET_NAME = "xgb_model.bst.zip"
-XGB_MODEL_ZIP_PATH = Path(os.getenv("XGB_MODEL_ZIP_PATH", str(Path("/tmp") / "xgb_model.bst.zip")))
+RELEASE_ASSET_NAME = os.getenv("RELEASE_ASSET_NAME", "xgb_model.bst.zip")
+XGB_MODEL_ZIP_PATH = Path(os.getenv("XGB_MODEL_ZIP_PATH", str(Path("/tmp") / RELEASE_ASSET_NAME)))
 XGB_MODEL_PATH = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.bst")))
 
 # Encoder local (repo). Si no existe, fallback /tmp descargado desde Releases
+ENCODER_ASSET_NAME = os.getenv("ENCODER_ASSET_NAME", "label_encoder.joblib")
 ENCODER_PATH = BASE_DIR / "label_encoder.joblib"
 ENCODER_TMP_PATH = Path("/tmp") / "label_encoder.joblib"
-ENCODER_ASSET_NAME = "label_encoder.joblib"
 
 # CSV de descripciones descargado desde DESC_CSV_URL (si está)
 DESC_TMP_PATH = Path("/tmp") / "species_catalog_with_description.csv"
 
 TARGET_SR = 16000
 
-
 # -----------------------------
-# YAMNet lazy-load (TF/TFHub lazy import)
+# YAMNet lazy-load
 # -----------------------------
 YAMNET_MODEL = None
 
@@ -56,7 +50,6 @@ def get_yamnet():
     global YAMNET_MODEL
     if YAMNET_MODEL is None:
         import tensorflow_hub as hub
-        # Evitar opciones experimentales en Render
         YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1")
     return YAMNET_MODEL
 
@@ -64,6 +57,13 @@ def get_yamnet():
 # -----------------------------
 # DOWNLOAD HELPERS
 # -----------------------------
+def _default_headers():
+    # Evita bloqueos/quirks con GitHub downloads
+    return {
+        "User-Agent": "render-bird-app/1.0",
+        "Accept": "*/*",
+    }
+
 def download_release_asset_if_missing(local_path: Path, asset_name: str):
     """
     Descarga directa del asset del último release (sin GitHub API).
@@ -74,14 +74,14 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
     url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/{asset_name}"
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with requests.get(url, stream=True, timeout=180, allow_redirects=True) as r:
+    with requests.get(url, stream=True, timeout=180, allow_redirects=True, headers=_default_headers()) as r:
         r.raise_for_status()
 
         ctype = (r.headers.get("Content-Type") or "").lower()
         if "text/html" in ctype:
             raise RuntimeError(
                 f"GitHub devolvió HTML en vez de binario. "
-                f"¿Existe '{asset_name}' en Releases?"
+                f"¿Existe '{asset_name}' en Releases? URL={url}"
             )
 
         tmp = local_path.with_suffix(".part")
@@ -97,15 +97,19 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
 
 def download_url_if_missing(local_path: Path, url: str, timeout: int = 60):
     """
-    Descarga desde una URL (raw github, etc.) a un fichero local.
+    Descarga desde una URL a un fichero local.
     """
     if local_path.exists() and local_path.stat().st_size > 0:
         return
 
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with requests.get(url, stream=True, timeout=timeout, allow_redirects=True) as r:
+    with requests.get(url, stream=True, timeout=timeout, allow_redirects=True, headers=_default_headers()) as r:
         r.raise_for_status()
+
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        if "text/html" in ctype:
+            raise RuntimeError(f"URL devolvió HTML (no CSV). url={url}")
 
         tmp = local_path.with_suffix(".part")
         with open(tmp, "wb") as f:
@@ -120,54 +124,36 @@ def download_url_if_missing(local_path: Path, url: str, timeout: int = 60):
 
 def unzip_if_missing(zip_path: Path, out_path: Path):
     """
-    Descomprime zip_path en su directorio si out_path no existe.
-    Espera que el zip contenga el fichero out_path.name.
+    Descomprime zip_path en /tmp. Si el .bst viene en subcarpetas, lo mueve a out_path.
     """
     if out_path.exists() and out_path.stat().st_size > 0:
         return
 
-    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    if not zip_path.exists() or zip_path.stat().st_size == 0:
+        raise RuntimeError(f"ZIP inexistente o vacío: {zip_path}")
 
     with zipfile.ZipFile(zip_path, "r") as z:
-        names = z.namelist()
-        if out_path.name not in [Path(n).name for n in names]:
-            raise RuntimeError(
-                f"El zip no contiene {out_path.name}. Contiene (primeros): {names[:20]}"
-            )
         z.extractall(zip_path.parent)
 
+    # 1) ¿salió justo donde lo esperas?
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return
+
+    # 2) Buscar cualquier .bst extraído y moverlo a out_path
+    bst_candidates = list(zip_path.parent.rglob("*.bst"))
+    if not bst_candidates:
+        raise RuntimeError(f"No hay .bst tras unzip. Revisa el contenido del ZIP: {zip_path}")
+
+    bst_candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+    bst_candidates[0].replace(out_path)
+
     if not out_path.exists() or out_path.stat().st_size == 0:
-        raise RuntimeError(f"No se generó el modelo tras unzip: {out_path}")
+        raise RuntimeError(f"No se pudo preparar el BST final en: {out_path}")
 
 
 # -----------------------------
-# LOADERS
+# DESCRIPTIONS
 # -----------------------------
-import requests
-
-def ensure_xgb_model():
-    if not XGB_MODEL_JSON_PATH.exists():
-        print("⬇️ Descargando modelo XGBoost...")
-        url = "https://raw.githubusercontent.com/anto-rom/Xeno_Canto_Project/main/src/xgb_model.json"   # AJUSTA ESTA URL
-        r = requests.get(url)
-        r.raise_for_status()
-
-        with open(XGB_MODEL_JSON_PATH, "wb") as f:
-            f.write(r.content)
-
-        print("✅ Modelo descargado")
-
-    else:
-        print("✔️ Modelo ya existe en /tmp")
-
-
-ensure_xgb_model()
-
-# Ahora sí puedes cargarlo
-model = XGBClassifier()
-model.load_model(XGB_MODEL_JSON_PATH)
-
-
 def resolve_description_file(project_root: Path) -> Path:
     candidates = [
         project_root / "data" / "raw" / "scientificName_description.xlsx",
@@ -181,10 +167,7 @@ def resolve_description_file(project_root: Path) -> Path:
             return p
 
     expected = "\n- " + "\n- ".join(str(x) for x in candidates)
-    raise FileNotFoundError(
-        "No se encontró archivo de descripciones. Esperaba uno de:"
-        f"{expected}"
-    )
+    raise FileNotFoundError("No se encontró archivo de descripciones. Esperaba uno de:" f"{expected}")
 
 
 def load_descriptions(file_path: Path) -> dict:
@@ -197,7 +180,6 @@ def load_descriptions(file_path: Path) -> dict:
             df = pd.read_csv(file_path, sep=";")
 
     df.columns = [c.strip() for c in df.columns]
-
     required = {"scientificName", "description"}
     if not required.issubset(set(df.columns)):
         raise ValueError(
@@ -207,7 +189,6 @@ def load_descriptions(file_path: Path) -> dict:
 
     df["scientificName"] = df["scientificName"].astype(str).str.strip()
     df["description"] = df["description"].astype(str)
-
     return dict(zip(df["scientificName"], df["description"]))
 
 
@@ -219,16 +200,19 @@ def load_audio(file_path: Path):
     waveform, _ = librosa.load(str(file_path), sr=TARGET_SR)
     return waveform
 
-
 def compute_yamnet_embeddings(audio):
     import tensorflow as tf
     yamnet = get_yamnet()
-    scores, embeddings, spectrogram = yamnet(audio)
+
+    # Render-safe: tensor float32 1D
+    audio_tf = tf.convert_to_tensor(audio, dtype=tf.float32)
+    audio_tf = tf.reshape(audio_tf, [-1])
+
+    scores, embeddings, spectrogram = yamnet(audio_tf)
     emb_mean = tf.reduce_mean(embeddings, axis=0).numpy()
     emb_std = tf.math.reduce_std(embeddings, axis=0).numpy()
-    n_frames = embeddings.shape[0]
+    n_frames = int(embeddings.shape[0])
     return np.concatenate([emb_mean, emb_std, [n_frames]])
-
 
 def predict_top5(model, label_encoder, x):
     proba = model.predict_proba([x])[0]
@@ -236,6 +220,16 @@ def predict_top5(model, label_encoder, x):
     species = label_encoder.inverse_transform(idx)
     scores = proba[idx]
     return list(zip(species, scores))
+
+def _fix_xgb_wrapper_after_load(model: XGBClassifier, label_encoder):
+    """
+    Garantiza que predict_proba funcione aunque load_model() no haya poblado atributos sklearn.
+    """
+    n_classes = int(len(getattr(label_encoder, "classes_", [])))
+    if n_classes > 0:
+        # atributos típicos del wrapper sklearn
+        model.n_classes_ = n_classes
+        model.classes_ = np.arange(n_classes)
 
 
 # -----------------------------
@@ -251,10 +245,8 @@ STATE = {
     "ready": False,
     "booting": False,
     "boot_error": None,
-
     "boot_step": None,
     "boot_started_at": None,
-
     "model": None,
     "label_encoder": None,
     "desc_map": None,
@@ -262,7 +254,6 @@ STATE = {
 }
 
 BOOT_LOCK = threading.Lock()
-
 
 def _bootstrap():
     try:
@@ -294,6 +285,9 @@ def _bootstrap():
 
         STATE["boot_step"] = "load_encoder"
         label_encoder = joblib.load(encoder_path)
+
+        # Fix crítico para predict_proba
+        _fix_xgb_wrapper_after_load(model, label_encoder)
 
         # 5) Descripciones: DESC_CSV_URL manda
         STATE["boot_step"] = "download_desc"
@@ -328,7 +322,6 @@ def _bootstrap():
 def ensure_ready():
     if STATE["ready"] or STATE["booting"]:
         return
-
     with BOOT_LOCK:
         if STATE["ready"] or STATE["booting"]:
             return
@@ -338,7 +331,7 @@ def ensure_ready():
 
 
 # -----------------------------
-# ROUTES (limpias y definitivas)
+# ROUTES
 # -----------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
@@ -352,33 +345,6 @@ def healthz():
         "boot_step": STATE.get("boot_step"),
         "boot_error": STATE["boot_error"],
         "boot_elapsed_s": elapsed,
-    }, 200
-
-
-@app.route("/debug_fs", methods=["GET"])
-def debug_fs():
-    templates_dir = BASE_DIR / "templates"
-    static_dir = BASE_DIR / "static"
-
-    def safe_list(p: Path):
-        try:
-            return sorted(os.listdir(p))
-        except Exception as e:
-            return [f"ERROR: {type(e).__name__}: {e}"]
-
-    return {
-        "cwd": str(Path.cwd()),
-        "base_dir": str(BASE_DIR),
-        "templates_dir": str(templates_dir),
-        "templates_exists": templates_dir.exists(),
-        "templates_list": safe_list(templates_dir),
-        "static_dir": str(static_dir),
-        "static_exists": static_dir.exists(),
-        "static_list": safe_list(static_dir),
-        "xgb_zip_path": str(XGB_MODEL_ZIP_PATH),
-        "xgb_zip_exists": XGB_MODEL_ZIP_PATH.exists(),
-        "xgb_path": str(XGB_MODEL_PATH),
-        "xgb_exists": XGB_MODEL_PATH.exists(),
     }, 200
 
 
@@ -424,7 +390,6 @@ def index():
             expected = BASE_DIR / "templates" / "index.html"
             return (f"TemplateNotFound: index.html (expected at {expected})", 500)
 
-    # Listo → lógica principal
     model = STATE["model"]
     label_encoder = STATE["label_encoder"]
     desc_map = STATE["desc_map"]
@@ -433,11 +398,7 @@ def index():
     if request.method == "POST":
         f = request.files.get("audio")
         if not f:
-            return render_template(
-                "index.html",
-                error="No se subió ningún archivo",
-                meta={"desc_file": str(desc_file_used)},
-            )
+            return render_template("index.html", error="No se subió ningún archivo", meta={"desc_file": str(desc_file_used)})
 
         tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{f.filename}"
         f.save(tmp_path)
@@ -447,13 +408,11 @@ def index():
             x = compute_yamnet_embeddings(waveform)
             top5 = predict_top5(model, label_encoder, x)
 
-            results = []
-            for sp, score in top5:
-                results.append({
-                    "scientificName": sp,
-                    "score": float(score),
-                    "description": desc_map.get(sp, "No description available."),
-                })
+            results = [{
+                "scientificName": sp,
+                "score": float(score),
+                "description": desc_map.get(sp, "No description available."),
+            } for sp, score in top5]
 
         except Exception as e:
             return render_template(
@@ -468,19 +427,12 @@ def index():
             except Exception:
                 pass
 
-        return render_template(
-            "index.html",
-            results=results,
-            meta={"desc_file": str(desc_file_used)},
-        )
+        return render_template("index.html", results=results, meta={"desc_file": str(desc_file_used)})
 
-    return render_template(
-        "index.html",
-        meta={"desc_file": str(desc_file_used)},
-    )
+    return render_template("index.html", meta={"desc_file": str(desc_file_used)})
 
 
 if __name__ == "__main__":
-    # Local only
     app.run(debug=True)
+
 
