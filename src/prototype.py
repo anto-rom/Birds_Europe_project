@@ -7,8 +7,8 @@ import traceback
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
-import joblib
+import csv
+import json
 import requests
 from flask import Flask, request, render_template
 from jinja2 import TemplateNotFound
@@ -42,10 +42,12 @@ RELEASE_ASSET_NAME = os.getenv("RELEASE_ASSET_NAME", "xgb_model.bst.zip")
 XGB_MODEL_ZIP_PATH = Path(os.getenv("XGB_MODEL_ZIP_PATH", str(Path("/tmp") / RELEASE_ASSET_NAME)))
 XGB_MODEL_PATH = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.bst")))
 
-# Encoder local (repo). Si no existe, fallback /tmp descargado desde Releases
-ENCODER_ASSET_NAME = os.getenv("ENCODER_ASSET_NAME", "label_encoder.joblib")
-ENCODER_PATH = BASE_DIR / "label_encoder.joblib"
-ENCODER_TMP_PATH = Path("/tmp") / "label_encoder.joblib"
+# Clases (evita cargar sklearn/joblib en Render: mucho consumo de RAM)
+# Genera este archivo en entrenamiento con algo como:
+#   json.dump(label_encoder.classes_.tolist(), open('classes.json','w'))
+CLASSES_ASSET_NAME = os.getenv("CLASSES_ASSET_NAME", "classes.json")
+CLASSES_PATH = BASE_DIR / "classes.json"
+CLASSES_TMP_PATH = Path("/tmp") / "classes.json"
 
 # CSV de descripciones descargado desde DESC_CSV_URL (si está)
 DESC_TMP_PATH = Path("/tmp") / "species_catalog_with_description.csv"
@@ -213,9 +215,6 @@ def unzip_if_missing(zip_path: Path, out_path: Path):
 # -----------------------------
 def resolve_description_file(project_root: Path) -> Path:
     candidates = [
-        project_root / "data" / "raw" / "scientificName_description.xlsx",
-        project_root / "data" / "raw" / "species_catalog_with_description.xlsx",
-        project_root / "data" / "processed" / "species_catalog_with_description.xlsx",
         project_root / "data" / "processed" / "species_catalog_with_description.csv",
         project_root / "src" / "species_catalog_with_description.csv",
     ]
@@ -228,25 +227,51 @@ def resolve_description_file(project_root: Path) -> Path:
 
 
 def load_descriptions(file_path: Path) -> dict:
-    if file_path.suffix.lower() in [".xlsx", ".xls"]:
-        df = pd.read_excel(file_path)
-    else:
+    """Carga descripciones desde CSV con el módulo estándar (menos RAM que pandas)."""
+    if file_path.suffix.lower() != ".csv":
+        raise ValueError(f"Solo se admite CSV para descripciones en Render: {file_path}")
+
+    # Intento 1: coma
+    for delimiter in [",", ";"]:
         try:
-            df = pd.read_csv(file_path)
-        except Exception:
-            df = pd.read_csv(file_path, sep=";")
+            with open(file_path, "r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f, delimiter=delimiter)
+                if not reader.fieldnames:
+                    continue
+                cols = {c.strip() for c in reader.fieldnames}
+                if not {"scientificName", "description"}.issubset(cols):
+                    continue
 
-    df.columns = [c.strip() for c in df.columns]
-    required = {"scientificName", "description"}
-    if not required.issubset(set(df.columns)):
-        raise ValueError(
-            f"El archivo de descripciones debe tener columnas {required}. "
-            f"Encontradas: {set(df.columns)}"
-        )
+                out = {}
+                for row in reader:
+                    sp = (row.get("scientificName") or "").strip()
+                    desc = (row.get("description") or "").strip()
+                    if sp:
+                        out[sp] = desc
+                if out:
+                    return out
+        except UnicodeDecodeError:
+            # Fallback latin1
+            with open(file_path, "r", encoding="latin1", newline="") as f:
+                reader = csv.DictReader(f, delimiter=delimiter)
+                if not reader.fieldnames:
+                    continue
+                cols = {c.strip() for c in reader.fieldnames}
+                if not {"scientificName", "description"}.issubset(cols):
+                    continue
+                out = {}
+                for row in reader:
+                    sp = (row.get("scientificName") or "").strip()
+                    desc = (row.get("description") or "").strip()
+                    if sp:
+                        out[sp] = desc
+                if out:
+                    return out
 
-    df["scientificName"] = df["scientificName"].astype(str).str.strip()
-    df["description"] = df["description"].astype(str)
-    return dict(zip(df["scientificName"], df["description"]))
+    raise ValueError(
+        f"CSV de descripciones inválido: {file_path}. "
+        "Debe tener columnas scientificName y description (separador ',' o ';')."
+    )
 
 
 # -----------------------------
@@ -270,7 +295,7 @@ def compute_yamnet_embeddings(audio):
     n_frames = int(embeddings.shape[0])
     return np.concatenate([emb_mean, emb_std, [n_frames]])
 
-def predict_top5(booster: xgb.Booster, label_encoder, x):
+def predict_top5(booster: xgb.Booster, classes: list[str], x):
     """
     Predice top-5 usando Booster + DMatrix (menor overhead de memoria).
     Requiere que el booster haya sido entrenado con multi:softprob (ideal).
@@ -292,7 +317,7 @@ def predict_top5(booster: xgb.Booster, label_encoder, x):
         )
 
     idx = np.argsort(proba)[::-1][:5]
-    species = label_encoder.inverse_transform(idx)
+    species = [classes[i] if i < len(classes) else f"class_{i}" for i in idx]
     scores = proba[idx]
     return list(zip(species, scores))
 
@@ -313,7 +338,7 @@ STATE = {
     "boot_step": None,
     "boot_started_at": None,
     "booster": None,          # <-- Booster
-    "label_encoder": None,
+    "classes": None,
     "desc_map": None,
     "desc_file": None,
 }
@@ -351,20 +376,23 @@ def _bootstrap():
         booster.load_model(str(XGB_MODEL_PATH))
         log("Booster loaded OK.")
 
-        # 4) Encoder: repo si existe; si no, Releases
-        _set_state(step="ensure_encoder")
-        encoder_path = ENCODER_PATH
-        if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
-            log(f"Encoder not found in repo path: {ENCODER_PATH}. Downloading from Releases...")
-            download_release_asset_if_missing(ENCODER_TMP_PATH, ENCODER_ASSET_NAME)
-            encoder_path = ENCODER_TMP_PATH
+        # 4) Clases: repo si existe; si no, Releases (evita sklearn/joblib => menos RAM)
+        _set_state(step="ensure_classes")
+        classes_path = CLASSES_PATH
+        if (not classes_path.exists()) or classes_path.stat().st_size == 0:
+            log(f"classes.json not found in repo path: {CLASSES_PATH}. Downloading from Releases...")
+            download_release_asset_if_missing(CLASSES_TMP_PATH, CLASSES_ASSET_NAME)
+            classes_path = CLASSES_TMP_PATH
 
-        if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
-            raise FileNotFoundError(f"Encoder no encontrado ni descargable: {encoder_path}")
+        if (not classes_path.exists()) or classes_path.stat().st_size == 0:
+            raise FileNotFoundError(f"classes.json no encontrado ni descargable: {classes_path}")
 
-        _set_state(step="load_encoder")
-        label_encoder = joblib.load(encoder_path)
-        log(f"Label encoder loaded: {encoder_path} (n={len(getattr(label_encoder, 'classes_', []))})")
+        _set_state(step="load_classes")
+        with open(classes_path, "r", encoding="utf-8") as f:
+            classes = json.load(f)
+        if not isinstance(classes, list) or not classes:
+            raise ValueError(f"classes.json inválido: {classes_path}")
+        log(f"Classes loaded: {classes_path} (n={len(classes)})")
 
         # 5) Descripciones: DESC_CSV_URL manda
         _set_state(step="download_desc")
@@ -383,7 +411,7 @@ def _bootstrap():
 
         _set_state(step="finalize")
         STATE["booster"] = booster
-        STATE["label_encoder"] = label_encoder
+        STATE["classes"] = classes
         STATE["desc_map"] = desc_map
         STATE["desc_file"] = desc_file
 
@@ -478,7 +506,7 @@ def index():
             return (f"TemplateNotFound: index.html (expected at {expected})", 500)
 
     booster = STATE["booster"]
-    label_encoder = STATE["label_encoder"]
+    classes = STATE["classes"]
     desc_map = STATE["desc_map"]
     desc_file_used = STATE["desc_file"]
 
@@ -493,7 +521,7 @@ def index():
         try:
             waveform = load_audio(tmp_path)
             x = compute_yamnet_embeddings(waveform)
-            top5 = predict_top5(booster, label_encoder, x)
+            top5 = predict_top5(booster, classes, x)
 
             results = [{
                 "scientificName": sp,
@@ -521,3 +549,4 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
