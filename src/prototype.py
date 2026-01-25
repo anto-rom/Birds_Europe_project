@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import uuid
 import threading
+from jinja2 import TemplateNotFound
 
 # Cache cross-platform (Render/Linux usa /tmp)
 os.environ["TFHUB_CACHE_DIR"] = os.getenv(
@@ -250,16 +251,20 @@ BOOT_LOCK = threading.Lock()
 
 def _bootstrap():
     try:
+        print("BOOT: starting bootstrap...")
         m, le, dm, df = safe_bootstrap_assets()
+        print("BOOT: assets loaded OK")
         STATE["model"] = m
         STATE["label_encoder"] = le
         STATE["desc_map"] = dm
         STATE["desc_file"] = df
         STATE["ready"] = True
         STATE["boot_error"] = None
+        print("BOOT: READY")
     except Exception as e:
         STATE["ready"] = False
         STATE["boot_error"] = f"{type(e).__name__}: {e}"
+        print("BOOT: ERROR ->", STATE["boot_error"])
     finally:
         STATE["booting"] = False
 
@@ -285,16 +290,24 @@ def ensure_ready():
 @app.route("/healthz", methods=["GET"])
 def healthz():
     ensure_ready()
-    if STATE["ready"]:
-        return {
-            "status": "ready",
-            "desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None
-        }, 200
-    return {
-        "status": "error",
-        "detail": STATE["boot_error"],
-        "booting": STATE["booting"]
-    }, 500
+
+    payload = {
+        "status": "ready" if STATE["ready"] else "starting" if STATE["booting"] else "error",
+        "booting": STATE["booting"],
+        "ready": STATE["ready"],
+        "boot_error": STATE["boot_error"],
+        "desc_file": str(STATE["desc_file"]) if STATE.get("desc_file") else None,
+        "xgb_model_path": str(XGB_MODEL_JSON_PATH),
+        "xgb_model_exists": XGB_MODEL_JSON_PATH.exists(),
+        "xgb_model_size_mb": round(XGB_MODEL_JSON_PATH.stat().st_size / 1024 / 1024, 2) if XGB_MODEL_JSON_PATH.exists() else None,
+        "encoder_repo_exists": ENCODER_PATH.exists(),
+        "encoder_tmp_exists": (Path("/tmp") / "label_encoder.joblib").exists(),
+        "desc_csv_url": os.getenv("DESC_CSV_URL"),
+    }
+
+    code = 200 if STATE["ready"] else 503
+    return payload, code
+
 
 @app.route("/debug_fs", methods=["GET"])
 def debug_fs():
@@ -335,75 +348,79 @@ def debug_boot():
         "boot_error": STATE["boot_error"],
     }, 200
 
-
 @app.route("/", methods=["GET", "POST"])
 def index():
     ensure_ready()
 
-    if not STATE["ready"]:
-        return render_template(
-            "index.html",
-            error="Fallo en el arranque de la app",
-            details=STATE["boot_error"],
-            meta={"desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None}
-        )
-
-    model = STATE["model"]
-    label_encoder = STATE["label_encoder"]
-    desc_map = STATE["desc_map"]
-    desc_file_used = STATE["desc_file"]
-
-    if request.method == "POST":
-        f = request.files.get("audio")
-        if not f:
+    try:
+        if not STATE["ready"]:
             return render_template(
                 "index.html",
-                error="No se subió ningún archivo",
-                meta={"desc_file": str(desc_file_used)}
+                error="Fallo en el arranque de la app",
+                details=STATE["boot_error"],
+                meta={"desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None}
             )
 
-        tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{f.filename}"
-        f.save(tmp_path)
+        model = STATE["model"]
+        label_encoder = STATE["label_encoder"]
+        desc_map = STATE["desc_map"]
+        desc_file_used = STATE["desc_file"]
 
-        try:
-            waveform = load_audio(tmp_path)
-            x = compute_yamnet_embeddings(waveform)
-            top5 = predict_top5(model, label_encoder, x)
+        if request.method == "POST":
+            f = request.files.get("audio")
+            if not f:
+                return render_template(
+                    "index.html",
+                    error="No se subió ningún archivo",
+                    meta={"desc_file": str(desc_file_used)}
+                )
 
-            results = []
-            for sp, score in top5:
-                results.append({
-                    "scientificName": sp,
-                    "score": float(score),
-                    "description": desc_map.get(sp, "No description available.")
-                })
+            tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{f.filename}"
+            f.save(tmp_path)
 
-        except Exception as e:
-            return render_template(
-                "index.html",
-                error="Error procesando el audio",
-                details=f"{type(e).__name__}: {e}",
-                meta={"desc_file": str(desc_file_used)}
-            )
-        finally:
             try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+                waveform = load_audio(tmp_path)
+                x = compute_yamnet_embeddings(waveform)
+                top5 = predict_top5(model, label_encoder, x)
+
+                results = []
+                for sp, score in top5:
+                    results.append({
+                        "scientificName": sp,
+                        "score": float(score),
+                        "description": desc_map.get(sp, "No description available.")
+                    })
+
+            except Exception as e:
+                return render_template(
+                    "index.html",
+                    error="Error procesando el audio",
+                    details=f"{type(e).__name__}: {e}",
+                    meta={"desc_file": str(desc_file_used)}
+                )
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            return render_template(
+                "index.html",
+                results=results,
+                meta={"desc_file": str(desc_file_used)}
+            )
 
         return render_template(
             "index.html",
-            results=results,
             meta={"desc_file": str(desc_file_used)}
         )
 
-    return render_template(
-        "index.html",
-        meta={"desc_file": str(desc_file_used)}
-    )
-
+    except TemplateNotFound as e:
+        # Esto te da visibilidad brutal y corta el "Bad Gateway"
+        return (
+            f"TemplateNotFound: {e}. Expected: {BASE_DIR / 'templates' / 'index.html'}",
+            500
+        )
 
 if __name__ == "__main__":
     app.run(debug=True)
-
-
