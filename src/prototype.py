@@ -2,6 +2,7 @@ import os
 import time
 import uuid
 import threading
+import zipfile
 from pathlib import Path
 
 # Cache cross-platform (Render/Linux usa /tmp)
@@ -29,38 +30,34 @@ from xgboost import XGBClassifier
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 
-# En Render descargamos el modelo a /tmp (por defecto)
-XGB_MODEL_JSON_PATH = Path(
-    os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.json"))
-)
+# GitHub repo
+GITHUB_OWNER = "anto-rom"
+GITHUB_REPO = "Xeno_Canto_Project"
+
+# Modelo XGB (ZIP en Releases -> descomprime a BST en /tmp)
+RELEASE_ASSET_NAME = "xgb_model.bst.zip"
+XGB_MODEL_ZIP_PATH = Path(os.getenv("XGB_MODEL_ZIP_PATH", str(Path("/tmp") / "xgb_model.bst.zip")))
+XGB_MODEL_PATH = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.bst")))
 
 # Encoder local (repo). Si no existe, fallback /tmp descargado desde Releases
 ENCODER_PATH = BASE_DIR / "label_encoder.joblib"
 ENCODER_TMP_PATH = Path("/tmp") / "label_encoder.joblib"
+ENCODER_ASSET_NAME = "label_encoder.joblib"
 
 # CSV de descripciones descargado desde DESC_CSV_URL (si está)
 DESC_TMP_PATH = Path("/tmp") / "species_catalog_with_description.csv"
-
-GITHUB_OWNER = "anto-rom"
-GITHUB_REPO = "Xeno_Canto_Project"
-
-RELEASE_ASSET_NAME = "xgb_model.ubj"
-XGB_MODEL_PATH = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.ubj")))
-
-ENCODER_ASSET_NAME = "label_encoder.joblib"
 
 TARGET_SR = 16000
 
 
 # -----------------------------
-# YAMNet lazy-load
+# YAMNet lazy-load (NO cargar en warmup/bootstrap)
 # -----------------------------
 YAMNET_MODEL = None
 
 def get_yamnet():
     global YAMNET_MODEL
     if YAMNET_MODEL is None:
-        # Importante: lazy, NO cargar en warmup/bootstrap
         load_opts = tf.saved_model.LoadOptions(experimental_io_device="/job:localhost")
         YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1", options=load_opts)
     return YAMNET_MODEL
@@ -121,6 +118,29 @@ def download_url_if_missing(local_path: Path, url: str, timeout: int = 60):
 
     if not local_path.exists() or local_path.stat().st_size == 0:
         raise RuntimeError(f"Descarga vacía/corrupta desde {url}")
+
+
+def unzip_if_missing(zip_path: Path, out_path: Path):
+    """
+    Descomprime zip_path en su directorio si out_path no existe.
+    Espera que el zip contenga el fichero out_path.name.
+    """
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return
+
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(zip_path, "r") as z:
+        names = z.namelist()
+        # validar que el zip contiene el fichero esperado (por nombre)
+        if out_path.name not in [Path(n).name for n in names]:
+            raise RuntimeError(
+                f"El zip no contiene {out_path.name}. Contiene (primeros): {names[:20]}"
+            )
+        z.extractall(zip_path.parent)
+
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise RuntimeError(f"No se generó el modelo tras unzip: {out_path}")
 
 
 # -----------------------------
@@ -225,11 +245,20 @@ def _bootstrap():
         STATE["boot_started_at"] = time.time()
         STATE["boot_error"] = None
 
-        # 1) Modelo XGBoost desde Releases
-        STATE["boot_step"] = "download_xgb"
-        download_release_asset_if_missing(XGB_MODEL_JSON_PATH, RELEASE_ASSET_NAME)
+        # 1) Descargar ZIP del modelo desde Releases
+        STATE["boot_step"] = "download_xgb_zip"
+        download_release_asset_if_missing(XGB_MODEL_ZIP_PATH, RELEASE_ASSET_NAME)
 
-        # 2) Encoder: repo si existe; si no, Releases
+        # 2) Unzip -> BST
+        STATE["boot_step"] = "unzip_xgb"
+        unzip_if_missing(XGB_MODEL_ZIP_PATH, XGB_MODEL_PATH)
+
+        # 3) Cargar modelo
+        STATE["boot_step"] = "load_xgb"
+        model = XGBClassifier()
+        model.load_model(str(XGB_MODEL_PATH))
+
+        # 4) Encoder: repo si existe; si no, Releases
         STATE["boot_step"] = "ensure_encoder"
         encoder_path = ENCODER_PATH
         if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
@@ -239,7 +268,10 @@ def _bootstrap():
         if (not encoder_path.exists()) or encoder_path.stat().st_size == 0:
             raise FileNotFoundError(f"Encoder no encontrado ni descargable: {encoder_path}")
 
-        # 3) Descripciones: DESC_CSV_URL manda
+        STATE["boot_step"] = "load_encoder"
+        label_encoder = joblib.load(encoder_path)
+
+        # 5) Descripciones: DESC_CSV_URL manda
         STATE["boot_step"] = "download_desc"
         desc_url = (os.getenv("DESC_CSV_URL") or "").strip()
         if desc_url:
@@ -250,14 +282,6 @@ def _bootstrap():
 
         STATE["boot_step"] = "load_desc"
         desc_map = load_descriptions(desc_file)
-
-        # 4) Cargar modelo + encoder
-        STATE["boot_step"] = "load_xgb"
-        model = XGBClassifier()
-        model.load_model(str(XGB_MODEL_JSON_PATH))
-
-        STATE["boot_step"] = "load_encoder"
-        label_encoder = joblib.load(encoder_path)
 
         # Importante: NO cargar YAMNet aquí (dejarlo lazy)
         STATE["boot_step"] = "finalize"
@@ -327,6 +351,10 @@ def debug_fs():
         "static_dir": str(static_dir),
         "static_exists": static_dir.exists(),
         "static_list": safe_list(static_dir),
+        "xgb_zip_path": str(XGB_MODEL_ZIP_PATH),
+        "xgb_zip_exists": XGB_MODEL_ZIP_PATH.exists(),
+        "xgb_path": str(XGB_MODEL_PATH),
+        "xgb_exists": XGB_MODEL_PATH.exists(),
     }, 200
 
 
@@ -433,4 +461,3 @@ def index():
 if __name__ == "__main__":
     # Local only
     app.run(debug=True)
-
