@@ -1,48 +1,93 @@
-﻿# Data
+# ============================================
+# 1. Python
+# ============================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.pkl
+*.pickle
+
+# Entornos
+.env
+.venv
+venv/
+env/
+ENV/
+*.env
+
+# Cache
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# ============================================
+# 2. IDEs / Editores
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ============================================
+# 3. Logs
+# ============================================
+*.log
+logs/
+*.out
+
+# ============================================
+# 4. Archivos de datos locales (NO versionar)
+# ============================================
 data/raw/
 data/interim/
 data/processed/
-notebooks/data/
-Add-Content .gitignore "artifacts/embeddings_yamnet/"
-Add-Content .gitignore "artifacts/model_artifacts/*.npy"
-Add-Content .gitignore "artifacts/model_artifacts/*.joblib"
-Add-Content .gitignore "__pycache__/"
-Add-Content .gitignore "*.npz"
-
-
-# DuckDB
-*.duckdb
-*.duckdb.wal
-
-# Artifacts / outputs
-artifacts/
+data/cache/
 audio_cache/
-embeddings_yamnet/
-*.npz
+tmp/
+temp/
 *.wav
 *.mp3
-*.flac
-*.ogg
+*.opus
 
-# Jupyter
-.ipynb_checkpoints/
+# ============================================
+# 5. Modelos / Pesos (solo si NO van al repo)
+#   Nota: tú ya usas Releases → no versionar aquí
+# ============================================
+*.joblib
+*.json
+*.h5
+*.pt
+*.onnx
+*.bin
+model/
+models/
+checkpoints/
 
-# Google Perch
-# Modelos y embeddings grandes
-perch_model/
-embeddings_perch/
-embeddings_yamnet/
-*.zip
+# ============================================
+# 6. Archivos generados por Jupyter / Pandas
+# ============================================
+*/figures/
+*/plots/
+*.png
+*.jpg
+*.jpeg
+*.svg
 
-# Archivos de cache y notebooks temporales
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
+# ============================================
+# 7. Herramientas / Build / OS
+# ============================================
+*.DS_Store
+Thumbs.db
 
-!data/
-!data/raw/
-!data/raw/species_catalog_with_description.csv
-
-
-
-
+# ============================================
+# 8. Excepciones (whitelist)
+#   Permite subir archivos necesarios dentro de /src/
+# ============================================
+!src/label_encoder.joblib
+!src/species_catalog_with_description.csv
+!src/requirements.txt
+!src/prototype.py
+!src/*.html
+!src/*.css
+!src/*.js
