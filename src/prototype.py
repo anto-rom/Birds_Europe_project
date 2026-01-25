@@ -287,38 +287,34 @@ def ensure_ready():
 # -----------------------------
 # ROUTES
 # -----------------------------
+# -----------------------------
+# RUTAS DEFINITIVAS
+# -----------------------------
+from flask import request, render_template
+from jinja2 import TemplateNotFound
+import os
+
+# 1) HEALTH CHECK DE RENDER — SIEMPRE 200, SIN BOOTSTRAP
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    ensure_ready()
-
-    payload = {
-        "status": "ready" if STATE["ready"] else "starting" if STATE["booting"] else "error",
-        "booting": STATE["booting"],
+    return {
         "ready": STATE["ready"],
+        "booting": STATE["booting"],
         "boot_error": STATE["boot_error"],
-        "desc_file": str(STATE["desc_file"]) if STATE.get("desc_file") else None,
-        "xgb_model_path": str(XGB_MODEL_JSON_PATH),
-        "xgb_model_exists": XGB_MODEL_JSON_PATH.exists(),
-        "xgb_model_size_mb": round(XGB_MODEL_JSON_PATH.stat().st_size / 1024 / 1024, 2) if XGB_MODEL_JSON_PATH.exists() else None,
-        "encoder_repo_exists": ENCODER_PATH.exists(),
-        "encoder_tmp_exists": (Path("/tmp") / "label_encoder.joblib").exists(),
-        "desc_csv_url": os.getenv("DESC_CSV_URL"),
-    }
-
-    code = 200 if STATE["ready"] else 503
-    return payload, code
+    }, 200
 
 
+# 2) DEBUG DEL FILESYSTEM — CRÍTICO PARA VER SI RENDER VE LOS TEMPLATES
 @app.route("/debug_fs", methods=["GET"])
 def debug_fs():
     templates_dir = BASE_DIR / "templates"
     static_dir = BASE_DIR / "static"
 
-    def safe_list(p: Path):
+    def safe_list(p):
         try:
             return sorted(os.listdir(p))
-        except Exception as e:
-            return [f"ERROR: {type(e).__name__}: {e}"]
+        except:
+            return ["ERROR"]
 
     return {
         "cwd": str(Path.cwd()),
@@ -332,95 +328,98 @@ def debug_fs():
     }, 200
 
 
-@app.route("/debug_boot", methods=["GET"])
-def debug_boot():
+# 3) WARMUP — AQUÍ SÍ ARRANCA EL BOOTSTRAP
+@app.route("/warmup", methods=["GET"])
+def warmup():
+    ensure_ready()
     return {
-        "cwd": str(Path.cwd()),
-        "base_dir": str(BASE_DIR),
-        "project_root": str(PROJECT_ROOT),
-        "xgb_model_path": str(XGB_MODEL_JSON_PATH),
-        "encoder_path_repo": str(ENCODER_PATH),
-        "encoder_path_tmp": str(ENCODER_TMP_PATH),
-        "desc_csv_url": os.getenv("DESC_CSV_URL"),
-        "tfhub_cache_dir": os.getenv("TFHUB_CACHE_DIR"),
         "ready": STATE["ready"],
         "booting": STATE["booting"],
         "boot_error": STATE["boot_error"],
     }, 200
 
+
+# 4) INDEX — SOLO GET/POST. HEAD SE IGNORA (EVITA BUCLE RENDER)
 @app.route("/", methods=["GET", "POST"])
 def index():
+    # Render health check usa HEAD /
+    if request.method == "HEAD":
+        return ("", 200)
+
     ensure_ready()
 
-    try:
-        if not STATE["ready"]:
+    # Si aún está arrancando, enseña la plantilla pero no trigger más boots
+    if not STATE["ready"]:
+        try:
             return render_template(
                 "index.html",
-                error="Fallo en el arranque de la app",
+                error="Inicializando...",
                 details=STATE["boot_error"],
-                meta={"desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None}
+                meta={"desc_file": str(STATE["desc_file"]) if STATE["desc_file"] else None},
             )
+        except TemplateNotFound:
+            return ("TemplateNotFound: index.html", 500)
 
-        model = STATE["model"]
-        label_encoder = STATE["label_encoder"]
-        desc_map = STATE["desc_map"]
-        desc_file_used = STATE["desc_file"]
+    # Ya listo → lógica principal
+    model = STATE["model"]
+    label_encoder = STATE["label_encoder"]
+    desc_map = STATE["desc_map"]
+    desc_file_used = STATE["desc_file"]
 
-        if request.method == "POST":
-            f = request.files.get("audio")
-            if not f:
-                return render_template(
-                    "index.html",
-                    error="No se subió ningún archivo",
-                    meta={"desc_file": str(desc_file_used)}
-                )
-
-            tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{f.filename}"
-            f.save(tmp_path)
-
-            try:
-                waveform = load_audio(tmp_path)
-                x = compute_yamnet_embeddings(waveform)
-                top5 = predict_top5(model, label_encoder, x)
-
-                results = []
-                for sp, score in top5:
-                    results.append({
-                        "scientificName": sp,
-                        "score": float(score),
-                        "description": desc_map.get(sp, "No description available.")
-                    })
-
-            except Exception as e:
-                return render_template(
-                    "index.html",
-                    error="Error procesando el audio",
-                    details=f"{type(e).__name__}: {e}",
-                    meta={"desc_file": str(desc_file_used)}
-                )
-            finally:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
+    # POST: procesar audio
+    if request.method == "POST":
+        f = request.files.get("audio")
+        if not f:
             return render_template(
                 "index.html",
-                results=results,
-                meta={"desc_file": str(desc_file_used)}
+                error="No se subió ningún archivo",
+                meta={"desc_file": str(desc_file_used)},
             )
+
+        tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{f.filename}"
+        f.save(tmp_path)
+
+        try:
+            waveform = load_audio(tmp_path)
+            x = compute_yamnet_embeddings(waveform)
+            top5 = predict_top5(model, label_encoder, x)
+
+            results = []
+            for sp, score in top5:
+                results.append({
+                    "scientificName": sp,
+                    "score": float(score),
+                    "description": desc_map.get(sp, "No description available."),
+                })
+
+        except Exception as e:
+            return render_template(
+                "index.html",
+                error="Error procesando el audio",
+                details=f"{type(e).__name__}: {e}",
+                meta={"desc_file": str(desc_file_used)},
+            )
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except:
+                pass
 
         return render_template(
             "index.html",
-            meta={"desc_file": str(desc_file_used)}
+            results=results,
+            meta={"desc_file": str(desc_file_used)},
         )
 
-    except TemplateNotFound as e:
-        # Esto te da visibilidad brutal y corta el "Bad Gateway"
-        return (
-            f"TemplateNotFound: {e}. Expected: {BASE_DIR / 'templates' / 'index.html'}",
-            500
+    # GET normal
+    try:
+        return render_template(
+            "index.html",
+            meta={"desc_file": str(desc_file_used)},
         )
+    except TemplateNotFound:
+        return ("TemplateNotFound: index.html", 500)
+# -----------------------------
 
 if __name__ == "__main__":
     app.run(debug=True)
