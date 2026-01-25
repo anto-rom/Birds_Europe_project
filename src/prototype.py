@@ -44,7 +44,9 @@ DESC_TMP_PATH = Path("/tmp") / "species_catalog_with_description.csv"
 GITHUB_OWNER = "anto-rom"
 GITHUB_REPO = "Xeno_Canto_Project"
 
-RELEASE_ASSET_NAME = "xgb_model.json"
+RELEASE_ASSET_NAME = "xgb_model.ubj"
+XGB_MODEL_PATH = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.ubj")))
+
 ENCODER_ASSET_NAME = "label_encoder.joblib"
 
 TARGET_SR = 16000
@@ -431,3 +433,4 @@ def index():
 if __name__ == "__main__":
     # Local only
     app.run(debug=True)
+
