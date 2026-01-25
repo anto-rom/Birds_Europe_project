@@ -18,9 +18,6 @@ import numpy as np
 import pandas as pd
 import joblib
 import requests
-import librosa
-import tensorflow_hub as hub
-import tensorflow as tf
 from xgboost import XGBClassifier
 
 
@@ -51,15 +48,16 @@ TARGET_SR = 16000
 
 
 # -----------------------------
-# YAMNet lazy-load (NO cargar en warmup/bootstrap)
+# YAMNet lazy-load (TF/TFHub lazy import)
 # -----------------------------
 YAMNET_MODEL = None
 
 def get_yamnet():
     global YAMNET_MODEL
     if YAMNET_MODEL is None:
-        load_opts = tf.saved_model.LoadOptions(experimental_io_device="/job:localhost")
-        YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1", options=load_opts)
+        import tensorflow_hub as hub
+        # Evitar opciones experimentales en Render
+        YAMNET_MODEL = hub.load("https://tfhub.dev/google/yamnet/1")
     return YAMNET_MODEL
 
 
@@ -132,7 +130,6 @@ def unzip_if_missing(zip_path: Path, out_path: Path):
 
     with zipfile.ZipFile(zip_path, "r") as z:
         names = z.namelist()
-        # validar que el zip contiene el fichero esperado (por nombre)
         if out_path.name not in [Path(n).name for n in names]:
             raise RuntimeError(
                 f"El zip no contiene {out_path.name}. Contiene (primeros): {names[:20]}"
@@ -193,11 +190,13 @@ def load_descriptions(file_path: Path) -> dict:
 # AUDIO / ML FUNCTIONS
 # -----------------------------
 def load_audio(file_path: Path):
+    import librosa
     waveform, _ = librosa.load(str(file_path), sr=TARGET_SR)
     return waveform
 
 
 def compute_yamnet_embeddings(audio):
+    import tensorflow as tf
     yamnet = get_yamnet()
     scores, embeddings, spectrogram = yamnet(audio)
     emb_mean = tf.reduce_mean(embeddings, axis=0).numpy()
@@ -383,7 +382,6 @@ def index():
 
     ensure_ready()
 
-    # Si aún está arrancando o falló, devuelve la plantilla con estado
     if not STATE["ready"]:
         try:
             return render_template(
@@ -451,7 +449,6 @@ def index():
             meta={"desc_file": str(desc_file_used)},
         )
 
-    # GET normal
     return render_template(
         "index.html",
         meta={"desc_file": str(desc_file_used)},
