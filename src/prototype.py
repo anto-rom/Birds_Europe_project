@@ -143,6 +143,31 @@ def unzip_if_missing(zip_path: Path, out_path: Path):
 # -----------------------------
 # LOADERS
 # -----------------------------
+import requests
+
+def ensure_xgb_model():
+    if not XGB_MODEL_JSON_PATH.exists():
+        print("⬇️ Descargando modelo XGBoost...")
+        url = "https://raw.githubusercontent.com/anto-rom/Xeno_Canto_Project/main/src/xgb_model.json"   # AJUSTA ESTA URL
+        r = requests.get(url)
+        r.raise_for_status()
+
+        with open(XGB_MODEL_JSON_PATH, "wb") as f:
+            f.write(r.content)
+
+        print("✅ Modelo descargado")
+
+    else:
+        print("✔️ Modelo ya existe en /tmp")
+
+
+ensure_xgb_model()
+
+# Ahora sí puedes cargarlo
+model = XGBClassifier()
+model.load_model(XGB_MODEL_JSON_PATH)
+
+
 def resolve_description_file(project_root: Path) -> Path:
     candidates = [
         project_root / "data" / "raw" / "scientificName_description.xlsx",
@@ -458,3 +483,4 @@ def index():
 if __name__ == "__main__":
     # Local only
     app.run(debug=True)
+
