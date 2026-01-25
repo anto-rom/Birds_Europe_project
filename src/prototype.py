@@ -12,13 +12,14 @@ import joblib
 import requests
 from flask import Flask, request, render_template
 from jinja2 import TemplateNotFound
-from xgboost import XGBClassifier
+
+import xgboost as xgb  # <-- Booster/DMatrix
+
 
 # ------------------------------------------
 # RENDER / LOGGING
 # ------------------------------------------
 # Recomendado en Render como env var: PYTHONUNBUFFERED=1
-# (aun así, forzamos flush=True en los logs críticos)
 def log(msg: str):
     print(f"[BOOT] {msg}", flush=True)
 
@@ -51,6 +52,7 @@ DESC_TMP_PATH = Path("/tmp") / "species_catalog_with_description.csv"
 
 TARGET_SR = 16000
 
+
 # -----------------------------
 # YAMNet lazy-load
 # -----------------------------
@@ -70,7 +72,6 @@ def get_yamnet():
 # DOWNLOAD HELPERS
 # -----------------------------
 def _default_headers():
-    # Evita bloqueos/quirks con GitHub downloads
     return {
         "User-Agent": "render-bird-app/1.0",
         "Accept": "*/*",
@@ -99,7 +100,6 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
     log(f"URL: {url}")
     log(f"Dest: {local_path}")
 
-    # timeouts robustos: (connect, read)
     with requests.get(
         url,
         stream=True,
@@ -177,26 +177,21 @@ def unzip_if_missing(zip_path: Path, out_path: Path):
         raise RuntimeError(f"ZIP inexistente o vacío: {zip_path}")
 
     log(f"Unzipping: {zip_path} -> {zip_path.parent}")
-    # Unzip
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(zip_path.parent)
 
-    # Debug: listar /tmp (acotado)
     try:
         tmp_listing = sorted([p.name for p in zip_path.parent.iterdir()])[:50]
         log(f"/tmp listing (first 50): {tmp_listing}")
     except Exception:
         pass
 
-    # 1) ¿salió justo donde lo esperas?
     if out_path.exists() and out_path.stat().st_size > 0:
         log(f"BST listo tras unzip: {out_path} ({out_path.stat().st_size} bytes)")
         return
 
-    # 2) Buscar cualquier .bst extraído y moverlo a out_path
     bst_candidates = list(zip_path.parent.rglob("*.bst"))
     if not bst_candidates:
-        # También dump de algunos ficheros extraídos
         extracted_any = list(zip_path.parent.rglob("*"))[:30]
         raise RuntimeError(
             f"No hay .bst tras unzip. ZIP={zip_path}. "
@@ -266,7 +261,6 @@ def compute_yamnet_embeddings(audio):
     import tensorflow as tf
     yamnet = get_yamnet()
 
-    # Render-safe: tensor float32 1D
     audio_tf = tf.convert_to_tensor(audio, dtype=tf.float32)
     audio_tf = tf.reshape(audio_tf, [-1])
 
@@ -276,21 +270,31 @@ def compute_yamnet_embeddings(audio):
     n_frames = int(embeddings.shape[0])
     return np.concatenate([emb_mean, emb_std, [n_frames]])
 
-def predict_top5(model, label_encoder, x):
-    proba = model.predict_proba([x])[0]
+def predict_top5(booster: xgb.Booster, label_encoder, x):
+    """
+    Predice top-5 usando Booster + DMatrix (menor overhead de memoria).
+    Requiere que el booster haya sido entrenado con multi:softprob (ideal).
+    """
+    X = np.asarray([x], dtype=np.float32)
+    dm = xgb.DMatrix(X)
+
+    pred = booster.predict(dm)
+    # pred puede venir como (n_samples, n_classes) o (n_samples,) si softmax/binary
+    pred = np.asarray(pred)
+    if pred.ndim == 2:
+        proba = pred[0]
+    else:
+        # si viniera softmax con class index, no tenemos probabilidades -> no sirve para top5
+        # y si fuera binary:logistic, pred sería prob de class=1
+        raise RuntimeError(
+            f"Formato de predicción inesperado: shape={pred.shape}. "
+            "Asegúrate de entrenar con objective='multi:softprob' para top-5."
+        )
+
     idx = np.argsort(proba)[::-1][:5]
     species = label_encoder.inverse_transform(idx)
     scores = proba[idx]
     return list(zip(species, scores))
-
-def _fix_xgb_wrapper_after_load(model: XGBClassifier, label_encoder):
-    """
-    Garantiza que predict_proba funcione aunque load_model() no haya poblado atributos sklearn.
-    """
-    n_classes = int(len(getattr(label_encoder, "classes_", [])))
-    if n_classes > 0:
-        model.n_classes_ = n_classes
-        model.classes_ = np.arange(n_classes)
 
 
 # -----------------------------
@@ -308,7 +312,7 @@ STATE = {
     "boot_error": None,
     "boot_step": None,
     "boot_started_at": None,
-    "model": None,
+    "booster": None,          # <-- Booster
     "label_encoder": None,
     "desc_map": None,
     "desc_file": None,
@@ -340,11 +344,12 @@ def _bootstrap():
         _set_state(step="unzip_xgb")
         unzip_if_missing(XGB_MODEL_ZIP_PATH, XGB_MODEL_PATH)
 
-        # 3) Cargar modelo
+        # 3) Cargar modelo con Booster (menos overhead)
         _set_state(step="load_xgb")
-        model = XGBClassifier()
-        model.load_model(str(XGB_MODEL_PATH))
-        log("XGB model loaded.")
+        log(f"About to load Booster from {XGB_MODEL_PATH} size={XGB_MODEL_PATH.stat().st_size}")
+        booster = xgb.Booster()
+        booster.load_model(str(XGB_MODEL_PATH))
+        log("Booster loaded OK.")
 
         # 4) Encoder: repo si existe; si no, Releases
         _set_state(step="ensure_encoder")
@@ -359,10 +364,7 @@ def _bootstrap():
 
         _set_state(step="load_encoder")
         label_encoder = joblib.load(encoder_path)
-        log(f"Label encoder loaded: {encoder_path}")
-
-        # Fix crítico para predict_proba
-        _fix_xgb_wrapper_after_load(model, label_encoder)
+        log(f"Label encoder loaded: {encoder_path} (n={len(getattr(label_encoder, 'classes_', []))})")
 
         # 5) Descripciones: DESC_CSV_URL manda
         _set_state(step="download_desc")
@@ -379,9 +381,8 @@ def _bootstrap():
         desc_map = load_descriptions(desc_file)
         log(f"Descriptions loaded from: {desc_file} (n={len(desc_map)})")
 
-        # Importante: NO cargar YAMNet aquí (dejarlo lazy)
         _set_state(step="finalize")
-        STATE["model"] = model
+        STATE["booster"] = booster
         STATE["label_encoder"] = label_encoder
         STATE["desc_map"] = desc_map
         STATE["desc_file"] = desc_file
@@ -420,7 +421,7 @@ def ensure_ready():
 # -----------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    ensure_ready()  # healthz dispara boot una vez, pero no lo reinicia
+    ensure_ready()
 
     elapsed = None
     if STATE.get("boot_started_at"):
@@ -454,7 +455,6 @@ def warmup():
 
 @app.route("/", methods=["GET", "POST", "HEAD"])
 def index():
-    # Render health check hace HEAD / (Go-http-client). No dispares bootstrap aquí.
     if request.method == "HEAD":
         return ("", 200)
 
@@ -477,7 +477,7 @@ def index():
             expected = BASE_DIR / "templates" / "index.html"
             return (f"TemplateNotFound: index.html (expected at {expected})", 500)
 
-    model = STATE["model"]
+    booster = STATE["booster"]
     label_encoder = STATE["label_encoder"]
     desc_map = STATE["desc_map"]
     desc_file_used = STATE["desc_file"]
@@ -493,7 +493,7 @@ def index():
         try:
             waveform = load_audio(tmp_path)
             x = compute_yamnet_embeddings(waveform)
-            top5 = predict_top5(model, label_encoder, x)
+            top5 = predict_top5(booster, label_encoder, x)
 
             results = [{
                 "scientificName": sp,
