@@ -228,7 +228,12 @@ def predict_top5(model, label_encoder, x):
 # -----------------------------
 # APP + STATE
 # -----------------------------
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    template_folder=str(BASE_DIR / "templates"),
+    static_folder=str(BASE_DIR / "static")
+)
+
 
 STATE = {
     "ready": False,
@@ -378,3 +383,4 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
