@@ -296,6 +296,28 @@ def healthz():
         "booting": STATE["booting"]
     }, 500
 
+@app.route("/debug_fs", methods=["GET"])
+def debug_fs():
+    templates_dir = BASE_DIR / "templates"
+    static_dir = BASE_DIR / "static"
+
+    def safe_list(p: Path):
+        try:
+            return sorted(os.listdir(p))
+        except Exception as e:
+            return [f"ERROR: {type(e).__name__}: {e}"]
+
+    return {
+        "cwd": str(Path.cwd()),
+        "base_dir": str(BASE_DIR),
+        "templates_dir": str(templates_dir),
+        "templates_exists": templates_dir.exists(),
+        "templates_list": safe_list(templates_dir),
+        "static_dir": str(static_dir),
+        "static_exists": static_dir.exists(),
+        "static_list": safe_list(static_dir),
+    }, 200
+
 
 @app.route("/debug_boot", methods=["GET"])
 def debug_boot():
@@ -383,4 +405,5 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
