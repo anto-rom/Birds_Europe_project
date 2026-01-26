@@ -47,8 +47,6 @@ CLASSES_ASSET_NAME = os.getenv("CLASSES_ASSET_NAME", "classes.json")
 CLASSES_PATH = BASE_DIR / "classes.json"
 CLASSES_TMP_PATH = Path("/tmp") / "classes.json"
 
-# CSV descripciones (opcional por URL)
-DESC_TMP_PATH = Path("/tmp") / "species_catalog_with_description.csv"
 TARGET_SR = 16000
 
 
@@ -307,16 +305,9 @@ def _bootstrap():
             raise ValueError(f"classes.json inválido: {classes_path}")
         log(f"Classes loaded: {classes_path} (n={len(classes)})")
 
-        # 4) Descripciones
-        _set_state(step="download_desc")
-        desc_url = (os.getenv("DESC_CSV_URL") or "").strip()
-        if desc_url:
-            download_url_if_missing(DESC_TMP_PATH, desc_url, timeout=60)
-            desc_file = DESC_TMP_PATH
-        else:
-            desc_file = resolve_description_file(PROJECT_ROOT)
-
+        # 4) Descripciones (local repo only)
         _set_state(step="load_desc")
+        desc_file = resolve_description_file(PROJECT_ROOT)
         desc_map = load_descriptions(desc_file)
         log(f"Descriptions loaded from: {desc_file} (n={len(desc_map)})")
 
@@ -437,4 +428,5 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
