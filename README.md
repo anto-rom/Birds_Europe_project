@@ -1,6 +1,9 @@
 # Bird Sound Recognition — Dual Architecture Project (YAMNet + Google Perch)
 Enfoque híbrido: Modelo de Recomendación + Modelo de Alta Precisión
 
+### https://xeno-canto-project-docker.onrender.com/
+### https://proyecto-xeno-canto-classifier-google.onrender.com/
+
 Este repositorio presenta una arquitectura dual diseñada para abordar el reconocimiento automático de cantos de aves mediante dos aproximaciones complementarias:
 
 YAMNet + XGBoost → Modelo de Recomendación
@@ -193,3 +196,4 @@ Otra profunda y precisa (alta fidelidad)
 Este diseño intencionado permite comparar trade-offs reales, entender mejor la dinámica bioacústica y construir un sistema diseñado para escalar en precisión, alcance y robustez.
 
 Ambos enfoques se integran bajo un único dataset, manteniendo coherencia técnica y permitiendo evolucionar hacia una futura plataforma bioacústica completa.
+
