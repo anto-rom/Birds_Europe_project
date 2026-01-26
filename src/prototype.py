@@ -470,7 +470,9 @@ def index():
             MAX_SECONDS = int(os.getenv("MAX_AUDIO_SECONDS", "5"))
             max_len = TARGET_SR * MAX_SECONDS
             if len(waveform) > max_len:
-               waveform = waveform[:max_len]
+                start = (len(waveform) - max_len) // 2
+                waveform = waveform[start:start + max_len]
+
 
             # LOG: ver cuántos segundos reales se van a procesar
             log(f"Audio samples={len(waveform)} seconds={len(waveform)/TARGET_SR:.2f}")
@@ -510,6 +512,7 @@ if __name__ == "__main__":
     # Render usa $PORT
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
 
