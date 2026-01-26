@@ -24,6 +24,6 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 # Copiar todo el código
 COPY . /app
 
-EXPOSE 5000
+EXPOSE 10000
+CMD ["gunicorn","--chdir","src","prototype:app","--bind","0.0.0.0:10000","--timeout","600","--workers","1","--threads","1","--capture-output","--log-level","info","--max-requests","200","--max-requests-jitter","50"]
 
-CMD ["python", "src/prototype.py"]
