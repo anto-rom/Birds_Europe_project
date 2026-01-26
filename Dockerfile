@@ -11,9 +11,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Dependencias del sistema para librosa/soundfile
+# Dependencia mínima para soundfile/librosa
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     libsndfile1 \
  && rm -rf /var/lib/apt/lists/*
 
@@ -24,6 +23,6 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 # Copiar todo el código
 COPY . /app
 
-EXPOSE 10000
-CMD ["gunicorn","--chdir","src","prototype:app","--bind","0.0.0.0:10000","--timeout","600","--workers","1","--threads","1","--capture-output","--log-level","info","--max-requests","200","--max-requests-jitter","50"]
+# Render inyecta PORT; evitamos hardcode
+CMD ["sh","-c","gunicorn --chdir src prototype:app --bind 0.0.0.0:${PORT:-10000} --timeout 600 --workers 1 --threads 1 --capture-output --log-level info --max-requests 200 --max-requests-jitter 50"]
 
