@@ -6,6 +6,8 @@
 Objetivo principal:
 Desarrollar un clasificador funcional de cantos de aves basado en embeddings YAMNet y un modelo supervisado (XGBoost), con despliegue web operativo y optimizado para ejecución cloud con recursos limitados.
 
+Fuente: https://xeno-canto.org/
+
 Outputs esperados:
 
 Dataset balanceado y curado de aves.
@@ -193,7 +195,7 @@ Incorporación de spectrogramas como features extras.
 
 ### https://proyecto-xeno-canto-classifier-google.onrender.com/
 
-1. Objetivo del Proyecto
+## 1. Objetivo del Proyecto
 
 El propósito principal del proyecto es desarrollar un sistema robusto de reconocimiento de cantos de aves utilizando Google Perch, un modelo de representación de audio entrenado por Google para bioacústica avanzada.
 El pipeline integra:
@@ -210,8 +212,8 @@ Obtención de métricas de precisión
 
 Validación funcional mediante una interfaz interactiva
 
-2. Preparación del Dataset
-2.1. Ingesta de datos
+## 2. Preparación del Dataset
+### 2.1. Ingesta de datos
 
 Lectura del CSV final procedente del repositorio principal (df_final.csv)
 
@@ -227,14 +229,14 @@ country
 
 description
 
-2.2. Estructuración por especie
+##2.2. Estructuración por especie
 
 Creación automática de carpetas por especie.
 
 Organización de todos los audios procesados en subdirectorios.
 
-3. Pipeline Google Perch
-3.1. Descarga y carga del modelo
+## 3. Pipeline Google Perch
+### 3.1. Descarga y carga del modelo
 
 Descarga desde Kaggle Models:
 bird-vocalization-classifier
@@ -249,8 +251,8 @@ Modelo especializado en bioacústica con vector de salida fijo de 1280 dimension
 
 Procesamiento interno basado en análisis tiempo-frecuencia de alta resolución.
 
-4. Generación de Embeddings
-4.1. Procesamiento de audio
+## 4. Generación de Embeddings
+### 4.1. Procesamiento de audio
 
 Descarga del audio original mediante URL directa de Xeno-Canto.
 
@@ -264,7 +266,7 @@ Ventana fija de 5 segundos
 
 Relleno o truncado según duración original
 
-4.2. Extracción del embedding
+### 4.2. Extracción del embedding
 
 Uso de Perch.process_array(samples)
 
@@ -278,14 +280,14 @@ species
 
 xc_id
 
-4.3. Stats del dataset procesado
+### 4.3. Stats del dataset procesado
 
 Total especies: 104
 
 Total embeddings generados: 92.271
 
-5. Entrenamiento del Modelo Supervisado
-5.1. Construcción del dataset final
+## 5. Entrenamiento del Modelo Supervisado
+### 5.1. Construcción del dataset final
 
 Carga del conjunto completo de embeddings.
 
@@ -303,7 +305,7 @@ Codificación de labels con LabelEncoder.
 
 Normalización con StandardScaler.
 
-5.3. Entrenamiento del modelo
+### 5.3. Entrenamiento del modelo
 
 Algoritmo: Regresión logística multinomial (Softmax)
 
@@ -315,7 +317,7 @@ Divisions: 80% train | 20% test
 
 Stratify por especie
 
-5.4. Métricas finales de precisión
+### 5.4. Métricas finales de precisión
 
 Top-1 Accuracy: 0.7682
 
@@ -327,8 +329,8 @@ perch_logreg_softmax.joblib
 
 label_encoder.joblib
 
-6. Validación y Testing
-6.1. Interfaz de pruebas
+## 6. Validación y Testing
+### 6.1. Interfaz de pruebas
 
 Implementación de un clasificador funcional sobre Gradio.
 
@@ -336,7 +338,7 @@ Capacidad de cargar MP3/WAV y devolver especie + confianza.
 
 Sistema multiplataforma optimizado para Apple Silicon (M2).
 
-6.2. Features clave de la inferencia
+### 6.2. Features clave de la inferencia
 
 Procesado en ventanas de 5 segundos para audios largos.
 
@@ -344,7 +346,7 @@ Media de todas las ventanas para generar un vector robusto.
 
 Umbral de confianza aplicado para evitar falsas predicciones (<40%).
 
-7. Resultados y Conclusiones
+## 7. Resultados y Conclusiones
 
 El modelo demuestra un rendimiento sólido, especialmente tratándose de audio silvestre con alta variabilidad.
 
@@ -354,7 +356,7 @@ El pipeline está limpio, modular y escalable.
 
 La metodología es óptima para aplicaciones de campo, proyectos educativos y prototipos de investigación.
 
-8. Roadmap Evolutivo
+## 8. Roadmap Evolutivo
 
 Incorporación de Transformers de audio o modelos de espectrogramas.
 
@@ -365,3 +367,4 @@ Ampliación del dataset a otras regiones (Latam, Asia).
 Integración en una API servida vía Flask o FastAPI.
 
 Dashboard web para visualización de predicciones en tiempo real.
+
