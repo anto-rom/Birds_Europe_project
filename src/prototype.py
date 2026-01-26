@@ -466,11 +466,15 @@ def index():
 
         try:
             waveform = load_audio(tmp_path)
-            MAX_SECONDS = int(os.getenv("MAX_AUDIO_SECONDS", "12"))
+
+            MAX_SECONDS = int(os.getenv("MAX_AUDIO_SECONDS", "10"))
             max_len = TARGET_SR * MAX_SECONDS
             if len(waveform) > max_len:
-                waveform = waveform[:max_len]
-            
+               waveform = waveform[:max_len]
+
+            # LOG: ver cuántos segundos reales se van a procesar
+            log(f"Audio samples={len(waveform)} seconds={len(waveform)/TARGET_SR:.2f}")
+
             x = compute_yamnet_embeddings(waveform)
             top5 = predict_top5(booster, classes, x)
 
@@ -482,6 +486,8 @@ def index():
                 }
                 for sp, score in top5
             ]
+
+ 
 
         except Exception as e:
             return render_template(
@@ -504,6 +510,7 @@ if __name__ == "__main__":
     # Render usa $PORT
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
 
