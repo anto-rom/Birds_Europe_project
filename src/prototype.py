@@ -229,6 +229,9 @@ def load_audio(file_path: Path):
     return waveform
 
 
+    x = compute_yamnet_embeddings(waveform)
+    top5 = predict_top5(booster, classes, x)
+
 def compute_yamnet_embeddings(audio: np.ndarray) -> np.ndarray:
     """
     Embedding agregado: mean + std + n_frames
@@ -463,6 +466,11 @@ def index():
 
         try:
             waveform = load_audio(tmp_path)
+            MAX_SECONDS = int(os.getenv("MAX_AUDIO_SECONDS", "12"))
+            max_len = TARGET_SR * MAX_SECONDS
+            if len(waveform) > max_len:
+            waveform = waveform[:max_len]
+            
             x = compute_yamnet_embeddings(waveform)
             top5 = predict_top5(booster, classes, x)
 
@@ -496,6 +504,7 @@ if __name__ == "__main__":
     # Render usa $PORT
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
 
