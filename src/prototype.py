@@ -467,7 +467,7 @@ def index():
         try:
             waveform = load_audio(tmp_path)
 
-            MAX_SECONDS = int(os.getenv("MAX_AUDIO_SECONDS", "10"))
+            MAX_SECONDS = int(os.getenv("MAX_AUDIO_SECONDS", "5"))
             max_len = TARGET_SR * MAX_SECONDS
             if len(waveform) > max_len:
                waveform = waveform[:max_len]
@@ -510,6 +510,7 @@ if __name__ == "__main__":
     # Render usa $PORT
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
 
