@@ -2,23 +2,23 @@ import os
 import time
 import uuid
 import threading
-import zipfile
 import traceback
 from pathlib import Path
-
 import csv
 import json
+
 import numpy as np
 import requests
 from flask import Flask, request, render_template
 from jinja2 import TemplateNotFound
+from werkzeug.utils import secure_filename
 
 
 # ------------------------------------------
-# RENDER / LOGGING
+# LOGGING
 # ------------------------------------------
 def log(msg: str):
-    print(f"[BOOT] {msg}", flush=True)
+    print(f"[APP] {msg}", flush=True)
 
 
 # Cache cross-platform (Render/Linux usa /tmp)
@@ -34,26 +34,31 @@ PROJECT_ROOT = BASE_DIR.parent
 GITHUB_OWNER = os.getenv("GITHUB_OWNER", "anto-rom")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "Xeno_Canto_Project")
 
-# ✅ Release target (para apuntar al tag exacto)
-RELEASE_TAG = os.getenv("RELEASE_TAG", "").strip()  # ej: "v1.1-compact" (recomendado)
-# ✅ Modelo compacto (ubj) por defecto
+# Recomendado: tag fijo para evitar sorpresas con "latest"
+RELEASE_TAG = os.getenv("RELEASE_TAG", "").strip()  # ej: "v1.1-compact"
 RELEASE_ASSET_NAME = os.getenv("RELEASE_ASSET_NAME", "compact_xgb_model.ubj")
 
-# Descarga a /tmp (si es zip, se descomprime)
+# Descarga a /tmp (modelo directo; NO zip por memoria)
 XGB_MODEL_LOCAL = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / RELEASE_ASSET_NAME)))
 
-# Clases (ligero, sin sklearn/joblib en Render)
+# Clases (ligero, sin sklearn/joblib)
 CLASSES_ASSET_NAME = os.getenv("CLASSES_ASSET_NAME", "classes.json")
-CLASSES_PATH = BASE_DIR / "classes.json"
-CLASSES_TMP_PATH = Path("/tmp") / "classes.json"
+CLASSES_PATH_REPO = BASE_DIR / "classes.json"
+CLASSES_PATH_TMP = Path("/tmp") / "classes.json"
 
 TARGET_SR = 16000
+
+# Upload hardening
+ALLOWED_EXTENSIONS = {".wav", ".mp3", ".ogg", ".flac", ".m4a"}
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))  # ajusta si quieres
+MAX_CONTENT_LENGTH = MAX_UPLOAD_MB * 1024 * 1024
 
 
 # -----------------------------
 # YAMNet lazy-load
 # -----------------------------
 YAMNET_MODEL = None
+
 
 def get_yamnet():
     global YAMNET_MODEL
@@ -71,6 +76,7 @@ def get_yamnet():
 def _default_headers():
     return {"User-Agent": "render-bird-app/1.0", "Accept": "*/*"}
 
+
 def _assert_not_html_response(r: requests.Response, url: str, asset_hint: str = ""):
     ctype = (r.headers.get("Content-Type") or "").lower()
     if "text/html" in ctype:
@@ -78,6 +84,7 @@ def _assert_not_html_response(r: requests.Response, url: str, asset_hint: str = 
             "GitHub/URL devolvió HTML en vez de binario. "
             f"{asset_hint} URL={url} content-type={ctype}"
         )
+
 
 def _release_download_url(asset_name: str) -> str:
     """
@@ -88,6 +95,7 @@ def _release_download_url(asset_name: str) -> str:
         return f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{RELEASE_TAG}/{asset_name}"
     return f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/{asset_name}"
 
+
 def download_release_asset_if_missing(local_path: Path, asset_name: str):
     if local_path.exists() and local_path.stat().st_size > 0:
         log(f"Asset ya existe: {local_path} ({local_path.stat().st_size} bytes)")
@@ -97,7 +105,7 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
     log(f"Downloading release asset: {asset_name}")
-    log(f"URL: {url}")
+    log(f"URL:  {url}")
     log(f"Dest: {local_path}")
 
     with requests.get(
@@ -112,6 +120,7 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
 
         tmp = local_path.with_suffix(".part")
         bytes_written = 0
+
         with open(tmp, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
                 if chunk:
@@ -133,34 +142,30 @@ def prepare_model_file(asset_name: str) -> Path:
     """
     if asset_name.lower().endswith(".zip"):
         raise RuntimeError(
-            f"Se ha proporcionado un asset .zip ({asset_name}), "
-            "pero esta build NO soporta zip por motivos de memoria. "
+            f"Asset .zip ({asset_name}) no soportado por memoria. "
             "Sube un archivo directo (.ubj/.json/.bst)."
         )
 
     local_asset = Path("/tmp") / asset_name
     download_release_asset_if_missing(local_asset, asset_name)
 
-    # valida que el modelo existe
     if not local_asset.exists() or local_asset.stat().st_size == 0:
         raise RuntimeError(f"Modelo no encontrado o vacío: {local_asset}")
 
     return local_asset
 
 
-    # coge el más grande (normalmente el correcto)
-    candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
-    model_path = candidates[0]
-    log(f"Model extracted: {model_path} ({model_path.stat().st_size} bytes)")
-    return model_path
-
 # -----------------------------
 # DESCRIPTIONS
 # -----------------------------
 def resolve_description_file(project_root: Path) -> Path:
+    """
+    Busca el CSV de descripciones en rutas típicas del repo.
+    """
     candidates = [
         project_root / "data" / "processed" / "species_catalog_with_description.csv",
         project_root / "src" / "species_catalog_with_description.csv",
+        BASE_DIR / "species_catalog_with_description.csv",
     ]
     for p in candidates:
         if p.exists() and p.stat().st_size > 0:
@@ -171,8 +176,12 @@ def resolve_description_file(project_root: Path) -> Path:
 
 
 def load_descriptions(file_path: Path) -> dict:
+    """
+    Carga un CSV con columnas: scientificName, description
+    Acepta delimitador ',' o ';' y encodings típicos.
+    """
     if file_path.suffix.lower() != ".csv":
-        raise ValueError(f"Solo se admite CSV para descripciones en Render: {file_path}")
+        raise ValueError(f"Solo se admite CSV para descripciones: {file_path}")
 
     for delimiter in [",", ";"]:
         for enc in ["utf-8", "latin1"]:
@@ -181,6 +190,7 @@ def load_descriptions(file_path: Path) -> dict:
                     reader = csv.DictReader(f, delimiter=delimiter)
                     if not reader.fieldnames:
                         continue
+
                     cols = {c.strip() for c in reader.fieldnames}
                     if not {"scientificName", "description"}.issubset(cols):
                         continue
@@ -203,14 +213,26 @@ def load_descriptions(file_path: Path) -> dict:
 
 
 # -----------------------------
-# AUDIO / ML FUNCTIONS
+# AUDIO / ML
 # -----------------------------
+def allowed_file(filename: str) -> bool:
+    suffix = Path(filename).suffix.lower()
+    return suffix in ALLOWED_EXTENSIONS
+
+
 def load_audio(file_path: Path):
+    """
+    Carga audio resampleado a TARGET_SR.
+    """
     import librosa  # lazy
-    waveform, _ = librosa.load(str(file_path), sr=TARGET_SR)
+    waveform, _ = librosa.load(str(file_path), sr=TARGET_SR, mono=True)
     return waveform
 
-def compute_yamnet_embeddings(audio):
+
+def compute_yamnet_embeddings(audio: np.ndarray) -> np.ndarray:
+    """
+    Embedding agregado: mean + std + n_frames
+    """
     import tensorflow as tf  # lazy
     yamnet = get_yamnet()
 
@@ -221,10 +243,13 @@ def compute_yamnet_embeddings(audio):
     emb_mean = tf.reduce_mean(embeddings, axis=0).numpy()
     emb_std = tf.math.reduce_std(embeddings, axis=0).numpy()
     n_frames = int(embeddings.shape[0])
+
     return np.concatenate([emb_mean, emb_std, [n_frames]]).astype(np.float32)
 
-def predict_top5(booster, classes: list[str], x):
+
+def predict_top5(booster, classes: list[str], x: np.ndarray):
     import xgboost as xgb  # lazy
+
     X = np.asarray([x], dtype=np.float32)
     dm = xgb.DMatrix(X)
     pred = booster.predict(dm)
@@ -233,11 +258,12 @@ def predict_top5(booster, classes: list[str], x):
     if pred.ndim != 2:
         raise RuntimeError(
             f"Formato de predicción inesperado: shape={pred.shape}. "
-            "Asegúrate de entrenar con objective='multi:softprob'."
+            "Entrena con objective='multi:softprob'."
         )
 
     proba = pred[0]
     idx = np.argsort(proba)[::-1][:5]
+
     species = [classes[i] if i < len(classes) else f"class_{i}" for i in idx]
     scores = proba[idx]
     return list(zip(species, scores))
@@ -246,7 +272,12 @@ def predict_top5(booster, classes: list[str], x):
 # -----------------------------
 # APP + STATE
 # -----------------------------
-app = Flask(__name__, template_folder=str(BASE_DIR / "templates"), static_folder=str(BASE_DIR / "static"))
+app = Flask(
+    __name__,
+    template_folder=str(BASE_DIR / "templates"),
+    static_folder=str(BASE_DIR / "static")
+)
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
 STATE = {
     "ready": False,
@@ -263,6 +294,7 @@ STATE = {
 BOOT_LOCK = threading.Lock()
 BOOT_THREAD = None
 
+
 def _set_state(step=None, err=None, ready=None, booting=None):
     if step is not None:
         STATE["boot_step"] = step
@@ -273,30 +305,31 @@ def _set_state(step=None, err=None, ready=None, booting=None):
     if booting is not None:
         STATE["booting"] = booting
 
+
 def _bootstrap():
     try:
         _set_state(err=None)
         log(f"BOOT start. RELEASE_TAG={RELEASE_TAG or 'latest'} ASSET={RELEASE_ASSET_NAME}")
 
-        # 1) Modelo (directo ubj o zip)
+        # 1) Modelo
         _set_state(step="download_model")
         model_path = prepare_model_file(RELEASE_ASSET_NAME)
 
-        # 2) Load Booster
+        # 2) Booster
         _set_state(step="load_xgb")
         import xgboost as xgb  # lazy
-        log(f"About to load Booster from {model_path} size={model_path.stat().st_size}")
+        log(f"Loading Booster from {model_path} size={model_path.stat().st_size}")
         booster = xgb.Booster()
         booster.load_model(str(model_path))
         log("Booster loaded OK.")
 
-        # 3) Clases (repo o release)
+        # 3) Clases
         _set_state(step="ensure_classes")
-        classes_path = CLASSES_PATH
+        classes_path = CLASSES_PATH_REPO
         if (not classes_path.exists()) or classes_path.stat().st_size == 0:
-            log(f"classes.json not found in repo path: {CLASSES_PATH}. Downloading from release...")
-            download_release_asset_if_missing(CLASSES_TMP_PATH, CLASSES_ASSET_NAME)
-            classes_path = CLASSES_TMP_PATH
+            log(f"classes.json not found in repo: {CLASSES_PATH_REPO}. Downloading from release...")
+            download_release_asset_if_missing(CLASSES_PATH_TMP, CLASSES_ASSET_NAME)
+            classes_path = CLASSES_PATH_TMP
 
         _set_state(step="load_classes")
         with open(classes_path, "r", encoding="utf-8") as f:
@@ -305,7 +338,7 @@ def _bootstrap():
             raise ValueError(f"classes.json inválido: {classes_path}")
         log(f"Classes loaded: {classes_path} (n={len(classes)})")
 
-        # 4) Descripciones (local repo only)
+        # 4) Descripciones (local repo)
         _set_state(step="load_desc")
         desc_file = resolve_description_file(PROJECT_ROOT)
         desc_map = load_descriptions(desc_file)
@@ -326,7 +359,11 @@ def _bootstrap():
     finally:
         _set_state(booting=False)
 
+
 def ensure_ready():
+    """
+    Dispara el bootstrap una única vez (thread-safe).
+    """
     global BOOT_THREAD
     if STATE["ready"] or STATE["booting"]:
         return
@@ -346,7 +383,7 @@ def ensure_ready():
 # -----------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    # Si quieres que healthcheck no dispare carga pesada, comenta ensure_ready()
+    # Ojo: si no quieres que el healthcheck dispare carga pesada, comenta ensure_ready()
     ensure_ready()
 
     elapsed = None
@@ -361,13 +398,19 @@ def healthz():
         "boot_elapsed_s": elapsed,
         "release_tag": RELEASE_TAG or "latest",
         "asset": RELEASE_ASSET_NAME,
+        "max_upload_mb": MAX_UPLOAD_MB,
     }, 200
 
 
 @app.route("/warmup", methods=["GET"])
 def warmup():
     ensure_ready()
-    return {"ok": True, "ready": STATE["ready"], "boot_step": STATE.get("boot_step"), "boot_error": STATE["boot_error"]}, 200
+    return {
+        "ok": True,
+        "ready": STATE["ready"],
+        "boot_step": STATE.get("boot_step"),
+        "boot_error": STATE["boot_error"],
+    }, 200
 
 
 @app.route("/", methods=["GET", "POST", "HEAD"])
@@ -383,7 +426,11 @@ def index():
                 "index.html",
                 error="Inicializando..." if STATE["booting"] else "Fallo en el arranque de la app",
                 details=STATE["boot_error"],
-                meta={"boot_step": STATE.get("boot_step"), "booting": STATE["booting"], "ready": STATE["ready"]},
+                meta={
+                    "boot_step": STATE.get("boot_step"),
+                    "booting": STATE["booting"],
+                    "ready": STATE["ready"],
+                },
             )
         except TemplateNotFound:
             expected = BASE_DIR / "templates" / "index.html"
@@ -396,10 +443,22 @@ def index():
 
     if request.method == "POST":
         f = request.files.get("audio")
-        if not f:
-            return render_template("index.html", error="No se subió ningún archivo", meta={"desc_file": str(desc_file_used)})
+        if not f or not f.filename:
+            return render_template(
+                "index.html",
+                error="No se subió ningún archivo",
+                meta={"desc_file": str(desc_file_used)},
+            )
 
-        tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{f.filename}"
+        filename = secure_filename(f.filename)
+        if not allowed_file(filename):
+            return render_template(
+                "index.html",
+                error=f"Formato no soportado. Sube: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+                meta={"desc_file": str(desc_file_used)},
+            )
+
+        tmp_path = Path("/tmp") / f"{uuid.uuid4().hex}_{filename}"
         f.save(tmp_path)
 
         try:
@@ -407,14 +466,21 @@ def index():
             x = compute_yamnet_embeddings(waveform)
             top5 = predict_top5(booster, classes, x)
 
-            results = [{
-                "scientificName": sp,
-                "score": float(score),
-                "description": desc_map.get(sp, "No description available."),
-            } for sp, score in top5]
+            results = [
+                {
+                    "scientificName": sp,
+                    "score": float(score),
+                    "description": desc_map.get(sp, "No description available."),
+                }
+                for sp, score in top5
+            ]
 
         except Exception as e:
-            return render_template("index.html", error="Error procesando el audio", details=f"{type(e).__name__}: {e}")
+            return render_template(
+                "index.html",
+                error="Error procesando el audio",
+                details=f"{type(e).__name__}: {e}",
+            )
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
@@ -427,6 +493,10 @@ def index():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Render usa $PORT
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
+
+
 
 
