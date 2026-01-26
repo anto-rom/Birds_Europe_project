@@ -103,7 +103,7 @@ Resultado del dataset:
 
 92.271 embeddings totales
 
-###3.5. Dataset Final para Modelado
+### 3.5. Dataset Final para Modelado
 
 X: matriz (n_samples, 1280)
 
@@ -114,15 +114,15 @@ Normalización con StandardScaler
 División estratificada 80/20
 
 ## 4. Diferencias Arquitectónicas Clave
-Componente	Proyecto YAMNet + XGBoost	Proyecto Perch + Softmax
-Modelo base	YAMNet (1024D)	Google Perch (1280D)
-Duración audio	Flexible	Fijo: 5s
-Frecuencia muestreo	16 kHz	32 kHz
-Archivo final	xgb_model.json	perch_logreg_softmax.joblib
-Embeddings totales	Menor volumen	92.271 embeddings
-Clasificador	XGBoost Softprob	Logistic Regression multinomial
-Complejidad	Alta con tuning	Ligera y eficiente
-##5. Arquitectura Final Integrada
+| Componente          | Proyecto YAMNet + XGBoost | Proyecto Perch + Softmax        |
+| ------------------- | ------------------------- | ------------------------------- |
+| Modelo base         | YAMNet (1024D)            | Google Perch (1280D)            |
+| Duración audio      | Flexible                  | Fijo: 5s                        |
+| Frecuencia muestreo | 16 kHz                    | 32 kHz                          |
+| Archivo final       | `xgb_model.json`          | `perch_logreg_softmax.joblib`   |
+| Embeddings totales  | Menor volumen             | 92.271 embeddings               |
+| Clasificador        | XGBoost Softprob          | Logistic Regression multinomial |
+| Complejidad         | Alta con tuning           | Ligera y eficiente              |
 
 Ambos proyectos comparten la misma fase de ingesta/curación, pero divergen a partir de la fase de extracción de características:
 
@@ -138,3 +138,5 @@ YAMNet → embedding 1024D          Perch → embedding 1280D
 XGBoost                              Logistic Regression
         ↓                                ↓
 Modelo final                        Modelo final
+
+
