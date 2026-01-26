@@ -37,9 +37,9 @@ GITHUB_OWNER = os.getenv("GITHUB_OWNER", "anto-rom")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "Xeno_Canto_Project")
 
 # Modelo XGB (ZIP en Releases -> descomprime a BST en /tmp)
-RELEASE_ASSET_NAME = os.getenv("RELEASE_ASSET_NAME", "xgb_model.bst.zip")
+RELEASE_ASSET_NAME = os.getenv("RELEASE_ASSET_NAME", "compact_xgb_model")
 XGB_MODEL_ZIP_PATH = Path(os.getenv("XGB_MODEL_ZIP_PATH", str(Path("/tmp") / RELEASE_ASSET_NAME)))
-XGB_MODEL_PATH = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.bst")))
+XGB_MODEL_PATH = Path(os.getenv("XGB_MODEL_PATH", str(Path("/tmp") / "xgb_model.ubj")))
 
 # Clases (evita cargar sklearn/joblib en Render: mucho consumo de RAM)
 # Genera este archivo en entrenamiento con algo como:
@@ -554,3 +554,4 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
