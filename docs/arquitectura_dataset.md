@@ -117,7 +117,7 @@ División estratificada 80/20
 | Componente          | Proyecto YAMNet + XGBoost | Proyecto Perch + Softmax        |
 | ------------------- | ------------------------- | ------------------------------- |
 | Modelo base         | YAMNet (1024D)            | Google Perch (1280D)            |
-| Duración audio      | Flexible                  | Fijo: 5s                        |
+| Duración audio      | Fijo: 5s                  | Flexible                        |
 | Frecuencia muestreo | 16 kHz                    | 32 kHz                          |
 | Archivo final       | `xgb_model.json`          | `perch_logreg_softmax.joblib`   |
 | Embeddings totales  | Menor volumen             | 92.271 embeddings               |
@@ -138,5 +138,6 @@ YAMNet → embedding 1024D          Perch → embedding 1280D
 XGBoost                              Logistic Regression
         ↓                                ↓
 Modelo final                        Modelo final
+
 
 
