@@ -50,8 +50,11 @@ TARGET_SR = 16000
 
 # Upload hardening
 ALLOWED_EXTENSIONS = {".wav", ".mp3", ".ogg", ".flac", ".m4a"}
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))  # ajusta si quieres
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
 MAX_CONTENT_LENGTH = MAX_UPLOAD_MB * 1024 * 1024
+
+# Anti-OOM: recorte de audio (segundos)
+MAX_AUDIO_SECONDS = int(os.getenv("MAX_AUDIO_SECONDS", "5"))
 
 
 # -----------------------------
@@ -87,10 +90,6 @@ def _assert_not_html_response(r: requests.Response, url: str, asset_hint: str = 
 
 
 def _release_download_url(asset_name: str) -> str:
-    """
-    Si RELEASE_TAG está definido -> descarga determinista desde ese tag.
-    Si no -> cae a latest (menos determinista).
-    """
     if RELEASE_TAG:
         return f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{RELEASE_TAG}/{asset_name}"
     return f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/{asset_name}"
@@ -136,10 +135,6 @@ def download_release_asset_if_missing(local_path: Path, asset_name: str):
 
 
 def prepare_model_file(asset_name: str) -> Path:
-    """
-    SOLO soporta modelo directo (.ubj, .json, .bst).
-    No soporta .zip — evita unzip y picos de memoria.
-    """
     if asset_name.lower().endswith(".zip"):
         raise RuntimeError(
             f"Asset .zip ({asset_name}) no soportado por memoria. "
@@ -159,9 +154,6 @@ def prepare_model_file(asset_name: str) -> Path:
 # DESCRIPTIONS
 # -----------------------------
 def resolve_description_file(project_root: Path) -> Path:
-    """
-    Busca el CSV de descripciones en rutas típicas del repo.
-    """
     candidates = [
         project_root / "data" / "processed" / "species_catalog_with_description.csv",
         project_root / "src" / "species_catalog_with_description.csv",
@@ -176,10 +168,6 @@ def resolve_description_file(project_root: Path) -> Path:
 
 
 def load_descriptions(file_path: Path) -> dict:
-    """
-    Carga un CSV con columnas: scientificName, description
-    Acepta delimitador ',' o ';' y encodings típicos.
-    """
     if file_path.suffix.lower() != ".csv":
         raise ValueError(f"Solo se admite CSV para descripciones: {file_path}")
 
@@ -220,21 +208,39 @@ def allowed_file(filename: str) -> bool:
     return suffix in ALLOWED_EXTENSIONS
 
 
-def load_audio(file_path: Path):
+def load_audio(file_path: Path) -> np.ndarray:
     """
     Carga audio resampleado a TARGET_SR.
     """
     import librosa  # lazy
-    waveform, _ = librosa.load(str(file_path), sr=TARGET_SR, mono=True)
+    waveform, _ = librosa.load(
+        str(file_path),
+        sr=TARGET_SR,
+        mono=True,
+        dtype=np.float32
+    )
     return waveform
 
 
-    x = compute_yamnet_embeddings(waveform)
-    top5 = predict_top5(booster, classes, x)
+def crop_waveform_center(waveform: np.ndarray, max_seconds: int) -> np.ndarray:
+    """
+    Recorta al centro para reducir RAM/tiempo sin depender de silencios al inicio/fin.
+    """
+    if max_seconds <= 0:
+        return waveform
+
+    max_len = TARGET_SR * max_seconds
+    if len(waveform) <= max_len:
+        return waveform
+
+    start = (len(waveform) - max_len) // 2
+    return waveform[start:start + max_len]
+
 
 def compute_yamnet_embeddings(audio: np.ndarray) -> np.ndarray:
     """
     Embedding agregado: mean + std + n_frames
+    (Ojo: esto debe coincidir con lo entrenado en XGBoost.)
     """
     import tensorflow as tf  # lazy
     yamnet = get_yamnet()
@@ -386,7 +392,6 @@ def ensure_ready():
 # -----------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    # Ojo: si no quieres que el healthcheck dispare carga pesada, comenta ensure_ready()
     ensure_ready()
 
     elapsed = None
@@ -402,12 +407,31 @@ def healthz():
         "release_tag": RELEASE_TAG or "latest",
         "asset": RELEASE_ASSET_NAME,
         "max_upload_mb": MAX_UPLOAD_MB,
+        "max_audio_seconds": MAX_AUDIO_SECONDS,
     }, 200
 
 
 @app.route("/warmup", methods=["GET"])
 def warmup():
     ensure_ready()
+    if not STATE["ready"]:
+        return {
+            "ok": False,
+            "ready": STATE["ready"],
+            "boot_step": STATE.get("boot_step"),
+            "boot_error": STATE["boot_error"],
+        }, 200
+
+    # Calentar YAMNet para evitar la 1ª inferencia lenta/oom
+    try:
+        yamnet = get_yamnet()
+        import tensorflow as tf
+        dummy = tf.zeros([TARGET_SR], dtype=tf.float32)  # 1 segundo
+        yamnet(dummy)
+        log("Warmup: YAMNet warmed.")
+    except Exception as e:
+        log(f"Warmup: YAMNet warm failed: {type(e).__name__}: {e}")
+
     return {
         "ok": True,
         "ready": STATE["ready"],
@@ -467,12 +491,8 @@ def index():
         try:
             waveform = load_audio(tmp_path)
 
-            MAX_SECONDS = int(os.getenv("MAX_AUDIO_SECONDS", "5"))
-            max_len = TARGET_SR * MAX_SECONDS
-            if len(waveform) > max_len:
-                start = (len(waveform) - max_len) // 2
-                waveform = waveform[start:start + max_len]
-
+            # Anti-OOM: recorte centrado
+            waveform = crop_waveform_center(waveform, MAX_AUDIO_SECONDS)
 
             # LOG: ver cuántos segundos reales se van a procesar
             log(f"Audio samples={len(waveform)} seconds={len(waveform)/TARGET_SR:.2f}")
@@ -488,8 +508,6 @@ def index():
                 }
                 for sp, score in top5
             ]
-
- 
 
         except Exception as e:
             return render_template(
@@ -509,13 +527,8 @@ def index():
 
 
 if __name__ == "__main__":
-    # Render usa $PORT
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
-
-
-
-
 
 
 
